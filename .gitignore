@@ -1,0 +1,110 @@
+############################
+# 1. GENERELLE ARTEFAKTE #
+############################
+
+# Temporäre Dateien des Betriebssystems
+# Ignoriert macOS-spezifische Dateien
+.DS_Store
+# Ignoriert Windows-spezifische Dateien
+Thumbs.db
+# Ignoriert System-Cache-Dateien
+*.bak
+*.swp
+*~
+*.log
+
+# Komprimierte Dateien, die in der Regel groß sind und neu erstellt werden können
+*.tar.gz
+*.zip
+
+##################################
+# 2. ABHÄNGIGKEITEN & MODULE     #
+##################################
+
+# Node.js / JavaScript
+# Ignoriert den Ordner, der alle heruntergeladenen Projekt-Abhängigkeiten enthält.
+# Dieser Ordner ist zu groß und wird von 'npm install' neu erstellt.
+/node_modules/
+
+# PHP / Composer
+# Ignoriert den Composer-Abhängigkeitsordner.
+/vendor/
+
+# Python
+# Ignoriert virtuelle Umgebungen (Virtual Environments).
+.venv/
+/env/
+/venv/
+
+##################################
+# 3. BUILD- & KOMPILIERUNGSZIELE #
+##################################
+
+# Frontend (Vite, Webpack, etc.)
+# Ignoriert den finalen Build-Output (den "fertigen" Code für die Produktion).
+/dist/
+/build/
+
+# Build-Caches
+# Ignoriert Vite- oder andere Build-Caches.
+.vite/
+# Ignoriert Caches für Next.js/Gatsby/etc.
+.next/
+.cache/
+
+# Java / Maven / Gradle
+/target/
+
+##################################
+# 4. ENTWICKLER-TOOLS & EDIOTREN #
+##################################
+
+# Visual Studio Code (VS Code)
+# Ignoriert lokale Workspace-Einstellungen, die nur für den aktuellen Benutzer gelten.
+.vscode/
+
+# JetBrains IDEs (IntelliJ, WebStorm, etc.)
+# Ignoriert lokale Konfigurationsdateien.
+.idea/
+
+# Lokale oder temporäre Ordner für individuelle Tests
+.local/
+tem/
+
+##################################
+# 5. SENSIBLE DATEN (SICHERHEIT) #
+##################################
+
+# Umgebungsvariablen
+# ESSENTIELL: Ignoriert die Datei, die sensible Daten (API-Keys, Passwörter) enthält.
+.env
+# Ignoriert die lokalen/Test-Versionen der .env-Datei.
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+##################################
+# 6. SERVER-SPEZIFISCHE ARTEFAKTE #
+##################################
+
+# Gegebenenfalls erstellte öffentliche oder temporäre Dateien auf dem Server
+# Wenn 'server/public' nur automatisch generierte Dateien enthält, ignorieren:
+# server/public/
+# Wenn 'server/public' handgeschriebene Assets (Bilder, Favicons) enthält, NICHT ignorieren.
+
+# Ignoriert Datenbank-Dateien, wenn diese lokal gehalten werden (z.B. SQLite)
+*.sqlite
+*.db
+
+##################################
+# 7. TYPESCRIPT/JEST ARTEFAKTE   #
+##################################
+
+# TypeScript Build-Informationen
+# Caches, die von TypeScript-Compilern erstellt werden.
+*.tsbuildinfo
+
+# Jest (Test-Framework)
+# Ignoriert den Ordner mit Test-Coverage-Berichten.
+/coverage/
