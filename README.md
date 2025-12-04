@@ -20,7 +20,7 @@ A web-based Arduino simulator that provides an interactive code editor, compilat
 
 - **Frontend**: React 18, TypeScript, Vite, TailwindCSS, Radix UI
 - **Backend**: Express, Node.js, WebSocket support
-- **Database**: Drizzle ORM with PostgreSQL/Neon
+- **Storage**: In-Memory storage (PostgreSQL/Neon infrastructure prepared but not yet integrated)
 - **Editor**: Monaco Editor
 - **Testing**: Jest with React Testing Library
 - **Build Tools**: esbuild, Vite
