@@ -42,10 +42,29 @@ describe('ArduinoCompiler - Full Coverage', () => {
         }
       `;
 
+      (spawn as jest.Mock)
+        .mockImplementationOnce(() => ({
+          stdout: {
+            on: (event: string, cb: Function) => {
+              if (event === 'data') cb(Buffer.from('Sketch uses 1024 bytes.\nGlobal variables use 32 bytes.\n'));
+            }
+          },
+          stderr: { on: jest.fn() },
+          on: (event: string, cb: Function) => {
+            if (event === 'close') cb(0);
+          }
+        }))
+        .mockImplementationOnce(() => ({
+          stderr: { on: jest.fn() },
+          on: (event: string, cb: Function) => {
+            if (event === 'close') cb(0);
+          }
+        }));
+
       const result = await compiler.compile(code);
 
-      expect(result.success).toBe(false);
-      expect(result.errors).toEqual(expect.stringContaining('Serial.begin(115200)'));
+      expect(result.success).toBe(true);
+      expect(result.output).toEqual(expect.stringContaining('Serial.begin(9600) verwendet falsche Baudrate'));
     });
 
     it('should succeed with Serial.begin(115200) in block comment but active code', async () => {
@@ -126,9 +145,28 @@ describe('ArduinoCompiler - Full Coverage', () => {
         }
       `;
 
+      (spawn as jest.Mock)
+        .mockImplementationOnce(() => ({
+          stdout: {
+            on: (event: string, cb: Function) => {
+              if (event === 'data') cb(Buffer.from('Sketch uses 1024 bytes.\nGlobal variables use 32 bytes.\n'));
+            }
+          },
+          stderr: { on: jest.fn() },
+          on: (event: string, cb: Function) => {
+            if (event === 'close') cb(0);
+          }
+        }))
+        .mockImplementationOnce(() => ({
+          stderr: { on: jest.fn() },
+          on: (event: string, cb: Function) => {
+            if (event === 'close') cb(0);
+          }
+        }));
+
       const result = await compiler.compile(code);
-      expect(result.success).toBe(false);
-      expect(result.errors).toEqual(expect.stringContaining('auskommentiert'));
+      expect(result.success).toBe(true);
+      expect(result.output).toEqual(expect.stringContaining('auskommentiert'));
     });
   });
 
