@@ -2,6 +2,8 @@
 
 A web-based Arduino simulator that provides an interactive code editor, compilation, and execution environment for Arduino sketches directly in the browser.
 
+
+
 ## Features
 
 - **Code Editor**: Monaco editor integration for writing Arduino sketches with syntax highlighting
@@ -9,6 +11,10 @@ A web-based Arduino simulator that provides an interactive code editor, compilat
 - **Serial Monitor**: Real-time output display from simulated Arduino execution
 - **Web-based**: No installation required, run entirely in the browser
 - **Modern UI**: Built with React and TailwindCSS for a responsive, professional interface
+
+## Screenshots
+
+![UnoWebSim Interface](./screenshot.png)
 
 ## Tech Stack
 
