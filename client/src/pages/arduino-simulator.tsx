@@ -334,6 +334,42 @@ export default function ArduinoSimulator() {
     setIsModified(false);
   };
 
+  const handleFilesLoaded = (files: Array<{ name: string; content: string }>, replaceAll: boolean) => {
+    if (replaceAll) {
+      // Replace all tabs with new files
+      const inoFiles = files.filter(f => f.name.endsWith('.ino'));
+      const hFiles = files.filter(f => f.name.endsWith('.h'));
+      
+      // Put .ino file first, then all .h files
+      const orderedFiles = [...inoFiles, ...hFiles];
+      
+      const newTabs = orderedFiles.map((file) => ({
+        id: Math.random().toString(36).substr(2, 9),
+        name: file.name,
+        content: file.content,
+      }));
+      
+      setTabs(newTabs);
+      
+      // Set the main .ino file as active
+      const inoTab = newTabs[0]; // Should be at index 0 now
+      if (inoTab) {
+        setActiveTabId(inoTab.id);
+        setCode(inoTab.content);
+        setIsModified(false);
+      }
+    } else {
+      // Add only .h files to existing tabs
+      const newHeaderFiles = files.map((file) => ({
+        id: Math.random().toString(36).substr(2, 9),
+        name: file.name,
+        content: file.content,
+      }));
+      
+      setTabs([...tabs, ...newHeaderFiles]);
+    }
+  };
+
   const handleTabClose = (tabId: string) => {
     // Prevent closing the first tab (the .ino file)
     if (tabId === tabs[0]?.id) {
@@ -617,6 +653,7 @@ export default function ArduinoSimulator() {
                 onTabClose={handleTabClose}
                 onTabRename={handleTabRename}
                 onTabAdd={handleTabAdd}
+                onFilesLoaded={handleFilesLoaded}
                 onFormatCode={formatCode}
               />
 

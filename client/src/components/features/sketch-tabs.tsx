@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
-import { X, ChevronLeft, ChevronRight, MoreVertical, Wand2, Pen, Trash2, Plus } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, MoreVertical, Wand2, Pen, Trash2, Plus, Download, Upload } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { useToast } from '@/hooks/use-toast';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -42,6 +43,7 @@ interface SketchTabsProps {
   onTabClose: (tabId: string) => void;
   onTabRename: (tabId: string, newName: string) => void;
   onTabAdd: () => void;
+  onFilesLoaded?: (files: Array<{ name: string; content: string }>, replaceAll: boolean) => void;
   onFormatCode?: () => void;
 }
 
@@ -53,14 +55,19 @@ export function SketchTabs({
   onTabClose,
   onTabRename,
   onTabAdd,
+  onFilesLoaded,
   onFormatCode,
 }: SketchTabsProps) {
+  const { toast } = useToast();
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
   const [newName, setNewName] = useState('');
   const [isRenameDialogOpen, setIsRenameDialogOpen] = useState(false);
   const [deleteConfirmTabId, setDeleteConfirmTabId] = useState<string | null>(null);
+  const [isReplaceConfirmOpen, setIsReplaceConfirmOpen] = useState(false);
+  const [pendingFilesToLoad, setPendingFilesToLoad] = useState<Array<{ name: string; content: string }> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const tabsContainerRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
 
@@ -150,6 +157,157 @@ export function SketchTabs({
     if (deleteConfirmTabId) {
       onTabClose(deleteConfirmTabId);
       setDeleteConfirmTabId(null);
+    }
+  };
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    try {
+      const loadedFiles: Array<{ name: string; content: string }> = [];
+      let inoCount = 0;
+
+      // Read all files
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const extension = file.name.substring(file.name.lastIndexOf('.'));
+
+        // Only allow .ino and .h files
+        if (extension !== '.ino' && extension !== '.h') {
+          toast({
+            title: "Ungültige Datei",
+            description: `"${file.name}" wird nicht unterstützt. Bitte nur .ino und .h Dateien laden.`,
+            variant: "destructive",
+          });
+          return;
+        }
+
+        if (extension === '.ino') {
+          inoCount++;
+        }
+
+        // Read file content
+        const content = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            resolve(e.target?.result as string);
+          };
+          reader.onerror = () => {
+            reject(new Error(`Fehler beim Lesen von ${file.name}`));
+          };
+          reader.readAsText(file);
+        });
+
+        loadedFiles.push({
+          name: file.name,
+          content: content,
+        });
+      }
+
+      // Multiple .ino files not allowed
+      if (inoCount > 1) {
+        toast({
+          title: "Zu viele .ino Dateien",
+          description: "Es darf nur eine .ino Datei geladen werden.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // If .ino file is present, show confirmation dialog
+      if (inoCount === 1) {
+        setPendingFilesToLoad(loadedFiles);
+        setIsReplaceConfirmOpen(true);
+      } else {
+        // Only .h files: add them directly
+        if (onFilesLoaded) {
+          onFilesLoaded(loadedFiles, false); // false = don't replace all
+        }
+
+        toast({
+          title: "Header-Dateien geladen",
+          description: `${loadedFiles.length} Header-Datei(en) hinzugefügt`,
+        });
+      }
+    } catch (error) {
+      toast({
+        title: "Fehler beim Laden",
+        description: error instanceof Error ? error.message : "Unbekannter Fehler",
+        variant: "destructive",
+      });
+    }
+
+    // Reset file input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const handleReplaceConfirmYes = () => {
+    if (pendingFilesToLoad && onFilesLoaded) {
+      onFilesLoaded(pendingFilesToLoad, true); // true = replace all
+      toast({
+        title: "Sketch ersetzt",
+        description: `${pendingFilesToLoad.length} Datei(en) geladen`,
+      });
+    }
+    setIsReplaceConfirmOpen(false);
+    setPendingFilesToLoad(null);
+  };
+
+  const handleReplaceConfirmNo = () => {
+    // Only add .h files, skip the .ino
+    if (pendingFilesToLoad && onFilesLoaded) {
+      const hFiles = pendingFilesToLoad.filter(f => f.name.endsWith('.h'));
+      if (hFiles.length > 0) {
+        onFilesLoaded(hFiles, false); // false = don't replace all
+        toast({
+          title: "Header-Dateien geladen",
+          description: `${hFiles.length} Header-Datei(en) hinzugefügt`,
+        });
+      } else {
+        toast({
+          title: "Keine Header-Dateien",
+          description: "Es waren nur .ino Dateien vorhanden.",
+        });
+      }
+    }
+    setIsReplaceConfirmOpen(false);
+    setPendingFilesToLoad(null);
+  };
+
+  const downloadAllTabs = async () => {
+    try {
+      // Download each file individually
+      tabs.forEach((tab, index) => {
+        setTimeout(() => {
+          const element = document.createElement('a');
+          element.setAttribute(
+            'href',
+            'data:text/plain;charset=utf-8,' + encodeURIComponent(tab.content)
+          );
+          element.setAttribute('download', tab.name);
+          element.style.display = 'none';
+          document.body.appendChild(element);
+          element.click();
+          document.body.removeChild(element);
+        }, index * 200); // Stagger downloads to avoid browser throttling
+      });
+      
+      // Show success toast after all downloads are initiated
+      setTimeout(() => {
+        toast({
+          title: "Download gestartet",
+          description: `${tabs.length} Datei(en) werden heruntergeladen`,
+        });
+      }, tabs.length * 200 + 100);
+    } catch (error) {
+      toast({
+        title: "Download fehlgeschlagen",
+        description: error instanceof Error ? error.message : "Unbekannter Fehler",
+        variant: "destructive",
+      });
     }
   };
 
@@ -280,9 +438,28 @@ export function SketchTabs({
                   Delete File
                 </DropdownMenuItem>
               )}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => fileInputRef.current?.click()}>
+                <Upload className="h-4 w-4 mr-2" />
+                Load Files
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={downloadAllTabs}>
+                <Download className="h-4 w-4 mr-2" />
+                Download All Files
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
+        
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept=".ino,.h"
+          onChange={handleFileUpload}
+          style={{ display: 'none' }}
+        />
       </div>
 
       {/* Scroll right button */}
@@ -346,6 +523,28 @@ export function SketchTabs({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Replace Sketch Confirmation Dialog */}
+      <AlertDialog open={isReplaceConfirmOpen} onOpenChange={setIsReplaceConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Sketch ersetzen?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Es wurde eine .ino-Datei zum Laden ausgewählt. Möchtest du den aktuellen Sketch ersetzen?
+              <br/><br/>
+              <strong>Ja:</strong> Der aktuelle Sketch wird vollständig ersetzt
+              <br/>
+              <strong>Nein:</strong> Nur die Header-Dateien (.h) werden hinzugefügt
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Nein (nur .h Dateien)</AlertDialogCancel>
+            <AlertDialogAction onClick={handleReplaceConfirmYes} className="bg-blue-600 hover:bg-blue-700">
+              Ja (Sketch ersetzen)
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
