@@ -54,7 +54,7 @@ interface CodeEditorProps {
   onCompileAndRun?: () => void;
   onFormat?: () => void;
   readOnly?: boolean;
-  editorRef?: React.RefObject<{ getValue: () => string }>;
+  editorRef?: React.MutableRefObject<{ getValue: () => string } | null>;
 }
 
 export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnly = false, editorRef: externalEditorRef }: CodeEditorProps) {
