@@ -32,6 +32,12 @@ export const wsMessageSchema = z.discriminatedUnion("type", [
     data: z.string(),
   }),
   z.object({
+    type: z.literal("start_simulation"),
+  }),
+  z.object({
+    type: z.literal("stop_simulation"),
+  }),
+  z.object({
     type: z.literal("compilation_status"),
     arduinoCliStatus: z.enum(["idle", "compiling", "success", "error"]).optional(),
     gccStatus: z.enum(["idle", "compiling", "success", "error"]).optional(),

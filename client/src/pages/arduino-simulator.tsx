@@ -85,8 +85,8 @@ export default function ArduinoSimulator() {
   // Stop simulation mutation
   const stopMutation = useMutation({
     mutationFn: async () => {
-      const response = await apiRequest('POST', '/api/stop-simulation');
-      return response.json();
+      sendMessage({ type: 'stop_simulation' });
+      return { success: true };
     },
     onSuccess: () => {
       setSimulationStatus('stopped');
@@ -96,8 +96,8 @@ export default function ArduinoSimulator() {
   // Start simulation mutation
   const startMutation = useMutation({
     mutationFn: async () => {
-      const response = await apiRequest('POST', '/api/start-simulation');
-      return response.json();
+      sendMessage({ type: 'start_simulation' });
+      return { success: true };
     },
     onSuccess: () => {
       setSimulationStatus('running');

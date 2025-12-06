@@ -5,7 +5,7 @@ import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
 import { compiler } from "./services/arduino-compiler";
-import { arduinoRunner } from "./services/arduino-runner";
+import { ArduinoRunner } from "./services/arduino-runner";
 import { insertSketchSchema, wsMessageSchema, type WSMessage } from "@shared/schema";
 
 import { Logger } from "@shared/logger"; // Pfad ggf. anpassen
@@ -19,7 +19,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
   let lastCompiledCode: string | null = null;
-  const getRunningStatus = () => runnerProcess?.isRunning === true;
+
+  // Map to store per-client runner processes
+  const clientRunners = new Map<WebSocket, { runner: ArduinoRunner | null; isRunning: boolean }>();
 
   function broadcastMessage(message: WSMessage) {
     wss.clients.forEach((client) => {
@@ -29,8 +31,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     });
   }
 
-  // Serial execution process handling
-  let runnerProcess: typeof arduinoRunner | null = null;
+  function sendMessageToClient(ws: WebSocket, message: WSMessage) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(message));
+    }
+  }
 
   // --- Sketch CRUD routes (leicht gekürzt) ---
   app.get('/api/sketches', async (_req, res) => {
@@ -119,96 +124,121 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Updated start-simulation route
-  app.post('/api/start-simulation', async (_req, res) => {
-    if (!lastCompiledCode) {
-      return res.status(400).json({ error: 'No compiled code available. Please compile first.' });
-    }
-
-    // Stop any current simulation
-    if (runnerProcess) runnerProcess.stop();
-
-    // Start genuine C++ execution with isComplete support!
-    runnerProcess = arduinoRunner;
-    runnerProcess.runSketch(
-      lastCompiledCode,
-      (line: string, isComplete?: boolean) => {
-        // UPDATED: Send isComplete flag to frontend
-        broadcastMessage({
-          type: 'serial_output',
-          data: line,
-          isComplete: isComplete ?? true // Default to true for backwards compatibility
-        });
-      },
-      (err: string) => {
-        logger.warn(`[to WS][ERR]: ${err}`);
-        broadcastMessage({ type: 'serial_output', data: '[ERR] ' + err });
-      },
-      (_code: number | null) => {
-        setTimeout(() => {
-          try {
-            broadcastMessage({
-              type: 'serial_output',
-              data: '--- Simulation beendet: Loop-Durchläufe abgeschlossen ---\n',
-              isComplete: true
-            });
-            broadcastMessage({ type: 'simulation_status', status: 'stopped' });
-          } catch (err) {
-            logger.error(`Fehler beim Senden der Stop-Nachricht: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }, 100);
-      }
-    );
-    broadcastMessage({
-      type: 'simulation_status',
-      status: 'running',
-    });
-    res.json({ success: true });
-  });
-
-  app.post('/api/stop-simulation', async (_req, res) => {
-    if (runnerProcess) runnerProcess.stop();
-    broadcastMessage({
-      type: 'simulation_status',
-      status: 'stopped',
-    });
-    broadcastMessage({
-      type: 'serial_output',
-      data: 'Simulation stopped\n',
-    });
-    res.json({ success: true });
-  });
-
-  // --- WebSocket Connection Handler (nur einmal) ---
+  // --- WebSocket Connection Handler (nun mit per-Client Sitzungen) ---
   wss.on('connection', (ws) => {
-    ws.send(JSON.stringify({
+    logger.info(`New WebSocket client connected. Total clients: ${wss.clients.size}`);
+    
+    // Initialize client session
+    clientRunners.set(ws, { runner: null, isRunning: false });
+
+    // Send initial status
+    const clientState = clientRunners.get(ws);
+    sendMessageToClient(ws, {
       type: 'simulation_status',
-      status: getRunningStatus() ? 'running' : 'stopped'
-    }));
+      status: clientState?.isRunning ? 'running' : 'stopped'
+    });
 
     ws.on('message', async (message) => {
       try {
         const data: WSMessage = wsMessageSchema.parse(JSON.parse(message.toString()));
 
         switch (data.type) {
-          case 'serial_input':
-            if (getRunningStatus()) {
-              arduinoRunner.sendSerialInput(data.data);
-              /*
-              broadcastMessage({
-                type: 'serial_output',
-                data: `> ${data.data}\n`,
+          case 'start_simulation':
+            {
+              const clientState = clientRunners.get(ws);
+              if (!clientState) break;
+              
+              if (!lastCompiledCode) {
+                sendMessageToClient(ws, {
+                  type: 'serial_output',
+                  data: '[ERR] No compiled code available. Please compile first.\n'
+                });
+                break;
+              }
+
+              // Stop any current simulation for this client
+              if (clientState.runner) clientState.runner.stop();
+
+              // Create a NEW runner instance for this client (not reusing global one)
+              clientState.runner = new ArduinoRunner();
+              clientState.isRunning = true;
+
+              // Update status
+              sendMessageToClient(ws, {
+                type: 'simulation_status',
+                status: 'running',
               });
-              */
-            } else {
-              logger.warn('Serial input received but simulation is not running.');
-            };
+
+              // Start genuine C++ execution with isComplete support!
+              clientState.runner.runSketch(
+                lastCompiledCode,
+                (line: string, isComplete?: boolean) => {
+                  sendMessageToClient(ws, {
+                    type: 'serial_output',
+                    data: line,
+                    isComplete: isComplete ?? true
+                  });
+                },
+                (err: string) => {
+                  logger.warn(`[Client WS][ERR]: ${err}`);
+                  sendMessageToClient(ws, {
+                    type: 'serial_output',
+                    data: '[ERR] ' + err
+                  });
+                },
+                (_code: number | null) => {
+                  setTimeout(() => {
+                    try {
+                      const clientState = clientRunners.get(ws);
+                      if (clientState) {
+                        clientState.isRunning = false;
+                      }
+                      sendMessageToClient(ws, {
+                        type: 'serial_output',
+                        data: '--- Simulation beendet: Loop-Durchläufe abgeschlossen ---\n',
+                        isComplete: true
+                      });
+                      sendMessageToClient(ws, {
+                        type: 'simulation_status',
+                        status: 'stopped'
+                      });
+                    } catch (err) {
+                      logger.error(`Fehler beim Senden der Stop-Nachricht: ${err instanceof Error ? err.message : String(err)}`);
+                    }
+                  }, 100);
+                }
+              );
+            }
             break;
 
-          // Hier können weitere Nachrichten-Typen behandelt werden, z.B.:
-          // case 'some_other_type':
-          //   // handle other message
-          //   break;
+          case 'stop_simulation':
+            {
+              const clientState = clientRunners.get(ws);
+              if (clientState?.runner) {
+                clientState.runner.stop();
+                clientState.isRunning = false;
+              }
+              sendMessageToClient(ws, {
+                type: 'simulation_status',
+                status: 'stopped',
+              });
+              sendMessageToClient(ws, {
+                type: 'serial_output',
+                data: 'Simulation stopped\n',
+              });
+            }
+            break;
+
+          case 'serial_input':
+            {
+              const clientState = clientRunners.get(ws);
+              if (clientState?.runner && clientState?.isRunning) {
+                clientState.runner.sendSerialInput(data.data);
+              } else {
+                logger.warn('Serial input received but simulation is not running.');
+              }
+            }
+            break;
 
           default:
             logger.warn(`Unbekannter WebSocket Nachrichtentyp: ${data.type}`);
@@ -217,6 +247,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } catch (error) {
         logger.error(`Invalid WebSocket message: ${error instanceof Error ? error.message : String(error)}`);
       }
+    });
+
+    ws.on('close', () => {
+      const clientState = clientRunners.get(ws);
+      if (clientState?.runner) {
+        clientState.runner.stop();
+      }
+      clientRunners.delete(ws);
+      logger.info(`Client disconnected. Remaining clients: ${wss.clients.size}`);
+    });
+
+    ws.on('error', (error) => {
+      logger.error(`WebSocket error: ${error instanceof Error ? error.message : String(error)}`);
     });
   });
 
