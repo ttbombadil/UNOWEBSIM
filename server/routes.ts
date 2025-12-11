@@ -2,6 +2,7 @@ import type { Express } from "express";
 import type { CompilationResult } from './services/arduino-compiler';
 
 import { createServer, type Server } from "http";
+import { createHash } from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
 import { compiler } from "./services/arduino-compiler";
@@ -19,6 +20,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
   let lastCompiledCode: string | null = null;
+
+  // Compilation Cache: Map<codeHash, CompilationResult>
+  const compilationCache = new Map<string, { result: CompilationResult; timestamp: number }>();
+  const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+  // Helper function to generate code hash
+  function hashCode(code: string, headers?: Array<{ name: string; content: string }>): string {
+    const combinedInput = code + JSON.stringify(headers || []);
+    return createHash('sha256').update(combinedInput).digest('hex');
+  }
 
   // Map to store per-client runner processes
   const clientRunners = new Map<WebSocket, { runner: ArduinoRunner | null; isRunning: boolean }>();
@@ -96,16 +107,46 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: 'Code is required' });
       }
 
+      // 🔥 CACHE CHECK: Hash the code and check if we've compiled it recently
+      const codeHash = hashCode(code, headers);
+      const cachedEntry = compilationCache.get(codeHash);
+      
+      if (cachedEntry) {
+        const cacheAge = Date.now() - cachedEntry.timestamp;
+        if (cacheAge < CACHE_TTL) {
+          logger.info(`✅ Cache hit for code (age: ${cacheAge}ms)`);
+          const result = cachedEntry.result;
+          
+          if (result.success) {
+            lastCompiledCode = result.processedCode || code;
+          }
+
+          broadcastMessage({
+            type: 'compilation_status',
+            arduinoCliStatus: result.arduinoCliStatus,
+          });
+
+          return res.json({ ...result, cached: true });
+        } else {
+          // Cache expired
+          compilationCache.delete(codeHash);
+        }
+      }
+
+      // 🔄 ACTUAL COMPILATION: Code not in cache, compile it
       console.log('[COMPILE] Received headers:', headers ? `${headers.length} files` : 'none');
       const result: CompilationResult = await compiler.compile(code, headers);
 
+      // 💾 CACHE STORAGE: Save successful compilations
       if (result.success) {
+        compilationCache.set(codeHash, { result, timestamp: Date.now() });
+        logger.info(`✅ Cached compilation result for code`);
+        
         // Store the processed code (with embedded headers) for simulation
         lastCompiledCode = result.processedCode || code;
       }
 
       // IMPORTANT: Message routing for compilation status:
-      // TODO: CLI-> do not broadccast!!! This here is wrong:
       // - arduinoCliStatus: Broadcast to all clients (shared compilation feedback)
       // - gccStatus: NOT broadcast (each client has independent GCC status)
       broadcastMessage({
