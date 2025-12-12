@@ -713,7 +713,7 @@ export default function ArduinoSimulator() {
                 onFormatCode={formatCode}
               />
 
-              <div className="flex-1">
+              <div className="flex-1 min-h-0">
                 <CodeEditor
                   value={code}
                   onChange={handleCodeChange}

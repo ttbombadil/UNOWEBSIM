@@ -144,9 +144,12 @@ export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnl
       };
     }
 
-    // Set up change listener
+    // Set up change listener with null check
     const changeDisposable = editor.onDidChangeModelContent(() => {
-      onChange(editor.getValue());
+      const model = editor.getModel();
+      if (model) {
+        onChange(editor.getValue());
+      }
     });
 
     // NEW: Add keyboard shortcut for formatting (Ctrl+Shift+F / Cmd+Shift+F)
@@ -165,10 +168,13 @@ export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnl
         
         if (formatted !== currentCode) {
           // Use executeEdits to maintain undo history
-          editor.executeEdits('format', [{
-            range: editor.getModel()!.getFullModelRange(),
-            text: formatted,
-          }]);
+          const model = editor.getModel();
+          if (model) {
+            editor.executeEdits('format', [{
+              range: model.getFullModelRange(),
+              text: formatted,
+            }]);
+          }
         }
       }
 
@@ -205,23 +211,26 @@ export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnl
       if (!selection) return;
 
       // Execute edit operation with the full pasted text
-      editor.executeEdits('paste', [{
-        range: selection,
-        text: text,
-        forceMoveMarkers: true,
-      }]);
+      const model = editor.getModel();
+      if (model) {
+        editor.executeEdits('paste', [{
+          range: selection,
+          text: text,
+          forceMoveMarkers: true,
+        }]);
 
-      // Move cursor to end of pasted text
-      const lines = text.split('\n');
-      const endLineNumber = selection.startLineNumber + lines.length - 1;
-      const endColumn = lines.length === 1 
-        ? selection.startColumn + text.length 
-        : lines[lines.length - 1].length + 1;
-      
-      editor.setPosition({
-        lineNumber: endLineNumber,
-        column: endColumn,
-      });
+        // Move cursor to end of pasted text
+        const lines = text.split('\n');
+        const endLineNumber = selection.startLineNumber + lines.length - 1;
+        const endColumn = lines.length === 1 
+          ? selection.startColumn + text.length 
+          : lines[lines.length - 1].length + 1;
+        
+        editor.setPosition({
+          lineNumber: endLineNumber,
+          column: endColumn,
+        });
+      }
     };
 
     if (domNode) {
