@@ -2,30 +2,27 @@
   "version": 2,
   "buildCommand": "npm ci --include=dev && npx vite build && npx esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
   "outputDirectory": "dist",
-  "env": {
-    "NODE_ENV": "production"
-  },
   "functions": {
-    "dist/index.js": {
-      "runtime": "nodejs18.x"
+    "server/index.ts": {
+      "runtime": "nodejs20.x"
     }
   },
   "routes": [
     {
       "src": "/api/(.*)",
-      "dest": "/index.js"
+      "dest": "server/index.ts"
     },
     {
       "src": "/ws",
-      "dest": "/index.js"
+      "dest": "server/index.ts"
     },
     {
       "src": "/examples/(.*)",
-      "dest": "/index.js"
+      "dest": "server/index.ts"
     },
     {
       "src": "/(.*)",
-      "dest": "/public/$1"
+      "dest": "/$1"
     }
   ]
 }
