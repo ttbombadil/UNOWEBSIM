@@ -10,6 +10,7 @@ import { SerialMonitor } from '@/components/features/serial-monitor';
 import { CompilationOutput } from '@/components/features/compilation-output';
 import { SketchTabs } from '@/components/features/sketch-tabs';
 import { ExamplesMenu } from '@/components/features/examples-menu';
+import { ArduinoBoard } from '@/components/features/arduino-board';
 import { useWebSocket } from '@/hooks/use-websocket';
 import { useToast } from '@/hooks/use-toast';
 import { apiRequest } from '@/lib/queryClient';
@@ -24,6 +25,14 @@ const logger = new Logger("ArduinoSimulator");
 interface OutputLine {
   text: string;
   complete: boolean;
+}
+
+// Pin state interface for Arduino board visualization
+interface PinState {
+  pin: number;
+  mode: 'INPUT' | 'OUTPUT' | 'INPUT_PULLUP';
+  value: number;
+  type: 'digital' | 'analog' | 'pwm';
 }
 
 export default function ArduinoSimulator() {
@@ -44,6 +53,9 @@ export default function ArduinoSimulator() {
   const [simulationStatus, setSimulationStatus] = useState<'running' | 'stopped'>('stopped');
   const [hasCompiledOnce, setHasCompiledOnce] = useState(false);
   const [isModified, setIsModified] = useState(false);
+  
+  // Pin states for Arduino board visualization
+  const [pinStates, setPinStates] = useState<PinState[]>([]);
 
 
   const { toast } = useToast();
@@ -322,7 +334,62 @@ export default function ArduinoSimulator() {
           break;
         case 'simulation_status':
           setSimulationStatus(message.status);
+          // Reset pin states when simulation stops
+          if (message.status === 'stopped') {
+            setPinStates([]);
+          }
           break;
+        case 'pin_state': {
+          // Update pin state for Arduino board visualization
+          const { pin, stateType, value } = message;
+          setPinStates(prev => {
+            const newStates = [...prev];
+            const existingIndex = newStates.findIndex(p => p.pin === pin);
+            
+            if (existingIndex >= 0) {
+              // Update existing pin state
+              if (stateType === 'mode') {
+                const modeMap: { [key: number]: 'INPUT' | 'OUTPUT' | 'INPUT_PULLUP' } = {
+                  0: 'INPUT',
+                  1: 'OUTPUT', 
+                  2: 'INPUT_PULLUP'
+                };
+                newStates[existingIndex] = {
+                  ...newStates[existingIndex],
+                  mode: modeMap[value] || 'INPUT'
+                };
+              } else if (stateType === 'value') {
+                newStates[existingIndex] = {
+                  ...newStates[existingIndex],
+                  value,
+                  type: 'digital'
+                };
+              } else if (stateType === 'pwm') {
+                newStates[existingIndex] = {
+                  ...newStates[existingIndex],
+                  value,
+                  type: 'pwm'
+                };
+              }
+            } else {
+              // Add new pin state
+              const modeMap: { [key: number]: 'INPUT' | 'OUTPUT' | 'INPUT_PULLUP' } = {
+                0: 'INPUT',
+                1: 'OUTPUT',
+                2: 'INPUT_PULLUP'
+              };
+              newStates.push({
+                pin,
+                mode: stateType === 'mode' ? (modeMap[value] || 'INPUT') : 'OUTPUT',
+                value: stateType === 'value' || stateType === 'pwm' ? value : 0,
+                type: stateType === 'pwm' ? 'pwm' : 'digital'
+              });
+            }
+            
+            return newStates;
+          });
+          break;
+        }
       }
     }
   }, [messageQueue, consumeMessages]);
@@ -414,6 +481,7 @@ export default function ArduinoSimulator() {
     // Clear previous outputs
     setCliOutput('');
     setSerialOutput([]);
+    setPinStates([]);
     setCompilationStatus('ready');
     setArduinoCliStatus('idle');
     setGccStatus('idle');
@@ -458,6 +526,7 @@ export default function ArduinoSimulator() {
   const handleCompile = () => {
     setCliOutput('');
     setSerialOutput([]);
+    setPinStates([]);
     
     // Get the actual main sketch code - use editor ref if available,
     // otherwise use state
@@ -783,7 +852,7 @@ export default function ArduinoSimulator() {
           {/* Right Panel - Output & Serial Monitor */}
           <ResizablePanel defaultSize={50} minSize={20} id="output-panel">
             <ResizablePanelGroup direction="vertical" id="output-layout">
-              <ResizablePanel defaultSize={50} minSize={20} id="compilation-panel">
+              <ResizablePanel defaultSize={33} minSize={15} id="compilation-panel">
                 <CompilationOutput
                   output={cliOutput}
                   onClear={handleClearCompilationOutput}
@@ -792,13 +861,22 @@ export default function ArduinoSimulator() {
 
               <ResizableHandle withHandle data-testid="vertical-resizer" />
 
-              <ResizablePanel defaultSize={50} minSize={20} id="serial-panel">
+              <ResizablePanel defaultSize={33} minSize={15} id="serial-panel">
                 <SerialMonitor
                   output={serialOutput}
                   isConnected={isConnected}
                   isSimulationRunning={simulationStatus === 'running'}
                   onSendMessage={handleSerialSend}
                   onClear={handleClearSerialOutput}
+                />
+              </ResizablePanel>
+
+              <ResizableHandle withHandle data-testid="vertical-resizer-board" />
+
+              <ResizablePanel defaultSize={34} minSize={15} id="board-panel">
+                <ArduinoBoard
+                  pinStates={pinStates}
+                  isSimulationRunning={simulationStatus === 'running'}
                 />
               </ResizablePanel>
             </ResizablePanelGroup>

@@ -29,7 +29,8 @@ export class ArduinoRunner {
         onOutput: (line: string, isComplete?: boolean) => void,
         onError: (line: string) => void,
         onExit: (code: number | null) => void,
-        onCompileError?: (error: string) => void
+        onCompileError?: (error: string) => void,
+        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void
     ) {
 
 
@@ -186,14 +187,34 @@ int main() {
                 // Send all complete lines
                 lines.forEach(line => {
                     if (line.length > 0) {
-                        this.logger.warn(`[STDERR line]: ${JSON.stringify(line)}`);
-                        onError(line);
+                        // Check for pin state messages
+                        const pinModeMatch = line.match(/\[\[PIN_MODE:(\d+):(\d+)\]\]/);
+                        const pinValueMatch = line.match(/\[\[PIN_VALUE:(\d+):(\d+)\]\]/);
+                        const pinPwmMatch = line.match(/\[\[PIN_PWM:(\d+):(\d+)\]\]/);
+                        
+                        if (pinModeMatch && onPinState) {
+                            const pin = parseInt(pinModeMatch[1]);
+                            const mode = parseInt(pinModeMatch[2]);
+                            onPinState(pin, 'mode', mode);
+                        } else if (pinValueMatch && onPinState) {
+                            const pin = parseInt(pinValueMatch[1]);
+                            const value = parseInt(pinValueMatch[2]);
+                            onPinState(pin, 'value', value);
+                        } else if (pinPwmMatch && onPinState) {
+                            const pin = parseInt(pinPwmMatch[1]);
+                            const value = parseInt(pinPwmMatch[2]);
+                            onPinState(pin, 'pwm', value);
+                        } else {
+                            // Regular error message
+                            this.logger.warn(`[STDERR line]: ${JSON.stringify(line)}`);
+                            onError(line);
+                        }
                     }
                 });
 
                 // Auto-flush stderr too
                 if (this.errorBuffer.length > 0) {
-                    this.scheduleErrorFlush(onError);
+                    this.scheduleErrorFlush(onError, onPinState);
                 }
             });
 
@@ -247,15 +268,28 @@ int main() {
     }
 
     // NEW: Schedule auto-flush for stderr
-    private scheduleErrorFlush(onError: (line: string) => void) {
+    private scheduleErrorFlush(onError: (line: string) => void, onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void) {
         if (this.flushTimer) {
             clearTimeout(this.flushTimer);
         }
 
         this.flushTimer = setTimeout(() => {
             if (this.errorBuffer.length > 0) {
-                this.logger.warn(`[STDERR auto-flush]: ${JSON.stringify(this.errorBuffer)}`);
-                onError(this.errorBuffer);
+                // Check for pin state messages in the remaining buffer
+                const pinModeMatch = this.errorBuffer.match(/\[\[PIN_MODE:(\d+):(\d+)\]\]/);
+                const pinValueMatch = this.errorBuffer.match(/\[\[PIN_VALUE:(\d+):(\d+)\]\]/);
+                const pinPwmMatch = this.errorBuffer.match(/\[\[PIN_PWM:(\d+):(\d+)\]\]/);
+                
+                if (pinModeMatch && onPinState) {
+                    onPinState(parseInt(pinModeMatch[1]), 'mode', parseInt(pinModeMatch[2]));
+                } else if (pinValueMatch && onPinState) {
+                    onPinState(parseInt(pinValueMatch[1]), 'value', parseInt(pinValueMatch[2]));
+                } else if (pinPwmMatch && onPinState) {
+                    onPinState(parseInt(pinPwmMatch[1]), 'pwm', parseInt(pinPwmMatch[2]));
+                } else {
+                    this.logger.warn(`[STDERR auto-flush]: ${JSON.stringify(this.errorBuffer)}`);
+                    onError(this.errorBuffer);
+                }
                 this.errorBuffer = "";
             }
             this.flushTimer = null;

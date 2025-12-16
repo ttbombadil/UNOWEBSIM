@@ -310,11 +310,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   }
                   logger.error(`[Client Compile Error]: ${compileErr}`);
                 },
-                () => {
-                  // onCompileSuccess: GCC compilation succeeded
+                (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => {
+                  // Send pin state update to client
                   sendMessageToClient(ws, {
-                    type: 'compilation_status',
-                    gccStatus: 'success',
+                    type: 'pin_state',
+                    pin,
+                    stateType: type,
+                    value
                   });
                 }
               );

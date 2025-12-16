@@ -82,7 +82,7 @@ export class SandboxRunner {
         onError: (line: string) => void,
         onExit: (code: number | null) => void,
         onCompileError?: (error: string) => void,
-        onCompileSuccess?: () => void
+        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void
     ) {
         this.isRunning = true;
         this.outputBuffer = "";
@@ -136,15 +136,11 @@ int main() {
             
             if (this.dockerAvailable && this.dockerImageBuilt) {
                 // Single container: compile AND run (more efficient)
-                this.compileAndRunInDocker(sketchDir, onOutput, onError, onExit, onCompileError, onCompileSuccess);
+                this.compileAndRunInDocker(sketchDir, onOutput, onError, onExit, onCompileError, undefined, onPinState);
             } else {
                 // Local fallback: compile then run
                 await this.compileLocal(sketchFile, exeFile, onCompileError);
-                // Compilation succeeded - notify caller
-                if (onCompileSuccess) {
-                    onCompileSuccess();
-                }
-                await this.runLocalWithLimits(exeFile, onOutput, onError, onExit);
+                await this.runLocalWithLimits(exeFile, onOutput, onError, onExit, onPinState);
             }
             
             // Note: Don't cleanup here - cleanup happens in close handler
@@ -177,7 +173,8 @@ int main() {
         onError: (line: string) => void,
         onExit: (code: number | null) => void,
         onCompileError?: (error: string) => void,
-        onCompileSuccess?: () => void
+        onCompileSuccess?: () => void,
+        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void
     ): void {
         // Single container: compile then run using shell
         // Uses sh -c to chain compile && run in one container
@@ -272,12 +269,32 @@ int main() {
             lines.forEach(line => {
                 if (line.length > 0) {
                     this.logger.warn(`[STDERR line]: ${JSON.stringify(line)}`);
-                    onError(line);
+                    
+                    // Check for pin state messages
+                    const pinModeMatch = line.match(/\[\[PIN_MODE:(\d+):(\d+)\]\]/);
+                    const pinValueMatch = line.match(/\[\[PIN_VALUE:(\d+):(\d+)\]\]/);
+                    const pinPwmMatch = line.match(/\[\[PIN_PWM:(\d+):(\d+)\]\]/);
+                    
+                    if (pinModeMatch && onPinState) {
+                        const pin = parseInt(pinModeMatch[1]);
+                        const mode = parseInt(pinModeMatch[2]);
+                        onPinState(pin, 'mode', mode);
+                    } else if (pinValueMatch && onPinState) {
+                        const pin = parseInt(pinValueMatch[1]);
+                        const value = parseInt(pinValueMatch[2]);
+                        onPinState(pin, 'value', value);
+                    } else if (pinPwmMatch && onPinState) {
+                        const pin = parseInt(pinPwmMatch[1]);
+                        const value = parseInt(pinPwmMatch[2]);
+                        onPinState(pin, 'pwm', value);
+                    } else {
+                        onError(line);
+                    }
                 }
             });
 
             if (this.errorBuffer.length > 0) {
-                this.scheduleErrorFlush(onError);
+                this.scheduleErrorFlush(onError, onPinState);
             }
         });
 
@@ -375,7 +392,8 @@ int main() {
         exeFile: string,
         onOutput: (line: string, isComplete?: boolean) => void,
         onError: (line: string) => void,
-        onExit: (code: number | null) => void
+        onExit: (code: number | null) => void,
+        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void
     ): Promise<void> {
         // Make executable
         await chmod(exeFile, 0o755);
@@ -396,13 +414,14 @@ int main() {
             this.process = spawn(exeFile);
         }
 
-        this.setupProcessHandlers(onOutput, onError, onExit);
+        this.setupProcessHandlers(onOutput, onError, onExit, onPinState);
     }
 
     private setupProcessHandlers(
         onOutput: (line: string, isComplete?: boolean) => void,
         onError: (line: string) => void,
-        onExit: (code: number | null) => void
+        onExit: (code: number | null) => void,
+        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void
     ): void {
         const timeout = setTimeout(() => {
             if (this.process) {
@@ -454,13 +473,33 @@ int main() {
 
             lines.forEach(line => {
                 if (line.length > 0) {
-                    this.logger.warn(`[STDERR line]: ${JSON.stringify(line)}`);
-                    onError(line);
+                    // Check for pin state messages
+                    const pinModeMatch = line.match(/\[\[PIN_MODE:(\d+):(\d+)\]\]/);
+                    const pinValueMatch = line.match(/\[\[PIN_VALUE:(\d+):(\d+)\]\]/);
+                    const pinPwmMatch = line.match(/\[\[PIN_PWM:(\d+):(\d+)\]\]/);
+                    
+                    if (pinModeMatch && onPinState) {
+                        const pin = parseInt(pinModeMatch[1]);
+                        const mode = parseInt(pinModeMatch[2]);
+                        onPinState(pin, 'mode', mode);
+                    } else if (pinValueMatch && onPinState) {
+                        const pin = parseInt(pinValueMatch[1]);
+                        const value = parseInt(pinValueMatch[2]);
+                        onPinState(pin, 'value', value);
+                    } else if (pinPwmMatch && onPinState) {
+                        const pin = parseInt(pinPwmMatch[1]);
+                        const value = parseInt(pinPwmMatch[2]);
+                        onPinState(pin, 'pwm', value);
+                    } else {
+                        // Regular error message
+                        this.logger.warn(`[STDERR line]: ${JSON.stringify(line)}`);
+                        onError(line);
+                    }
                 }
             });
 
             if (this.errorBuffer.length > 0) {
-                this.scheduleErrorFlush(onError);
+                this.scheduleErrorFlush(onError, onPinState);
             }
         });
 
@@ -516,15 +555,28 @@ int main() {
         }, 50);
     }
 
-    private scheduleErrorFlush(onError: (line: string) => void) {
+    private scheduleErrorFlush(onError: (line: string) => void, onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void) {
         if (this.flushTimer) {
             clearTimeout(this.flushTimer);
         }
 
         this.flushTimer = setTimeout(() => {
             if (this.errorBuffer.length > 0) {
-                this.logger.warn(`[STDERR auto-flush]: ${JSON.stringify(this.errorBuffer)}`);
-                onError(this.errorBuffer);
+                // Check for pin state messages in the remaining buffer
+                const pinModeMatch = this.errorBuffer.match(/\[\[PIN_MODE:(\d+):(\d+)\]\]/);
+                const pinValueMatch = this.errorBuffer.match(/\[\[PIN_VALUE:(\d+):(\d+)\]\]/);
+                const pinPwmMatch = this.errorBuffer.match(/\[\[PIN_PWM:(\d+):(\d+)\]\]/);
+                
+                if (pinModeMatch && onPinState) {
+                    onPinState(parseInt(pinModeMatch[1]), 'mode', parseInt(pinModeMatch[2]));
+                } else if (pinValueMatch && onPinState) {
+                    onPinState(parseInt(pinValueMatch[1]), 'value', parseInt(pinValueMatch[2]));
+                } else if (pinPwmMatch && onPinState) {
+                    onPinState(parseInt(pinPwmMatch[1]), 'pwm', parseInt(pinPwmMatch[2]));
+                } else {
+                    this.logger.warn(`[STDERR auto-flush]: ${JSON.stringify(this.errorBuffer)}`);
+                    onError(this.errorBuffer);
+                }
                 this.errorBuffer = "";
             }
             this.flushTimer = null;

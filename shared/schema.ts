@@ -51,6 +51,12 @@ export const wsMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("simulation_status"),
     status: z.enum(["running", "stopped"]),
   }),
+  z.object({
+    type: z.literal("pin_state"),
+    pin: z.number(),
+    stateType: z.enum(["mode", "value", "pwm"]),
+    value: z.number(),
+  }),
 ]);
 
 export type WSMessage = z.infer<typeof wsMessageSchema>;

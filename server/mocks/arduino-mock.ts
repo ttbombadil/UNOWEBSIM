@@ -131,12 +131,43 @@ public:
     }
 };
 
-// GPIO Functions (suppress unused parameter warnings)
-void pinMode(int, int) {}
-void digitalWrite(int, int) {}
-int digitalRead(int) { return LOW; }
-void analogWrite(int, int) {}
-int analogRead(int) { return 0; }
+// Pin state tracking for visualization
+static int pinModes[20] = {0};   // 0=INPUT, 1=OUTPUT, 2=INPUT_PULLUP
+static int pinValues[20] = {0};  // Digital: 0=LOW, 1=HIGH
+
+// GPIO Functions with state tracking
+void pinMode(int pin, int mode) {
+    if (pin >= 0 && pin < 20) {
+        pinModes[pin] = mode;
+        // Send pin state update via stderr (special protocol)
+        std::cerr << "[[PIN_MODE:" << pin << ":" << mode << "]]" << std::endl;
+    }
+}
+
+void digitalWrite(int pin, int value) {
+    if (pin >= 0 && pin < 20) {
+        pinValues[pin] = value;
+        // Send pin state update via stderr (special protocol)
+        std::cerr << "[[PIN_VALUE:" << pin << ":" << value << "]]" << std::endl;
+    }
+}
+
+int digitalRead(int pin) { 
+    if (pin >= 0 && pin < 20) {
+        return pinValues[pin];
+    }
+    return LOW; 
+}
+
+void analogWrite(int pin, int value) {
+    if (pin >= 0 && pin < 20) {
+        pinValues[pin] = value;
+        // Send PWM value update via stderr
+        std::cerr << "[[PIN_PWM:" << pin << ":" << value << "]]" << std::endl;
+    }
+}
+
+int analogRead(int pin) { return 0; }
 
 // Timing Functions
 void delay(unsigned long ms) { 
