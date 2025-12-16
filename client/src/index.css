@@ -94,7 +94,7 @@
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 18px;
-  background: hsl(0 0% 3%);
+  background: var(--background);
   color: hsl(0 0% 85%);
   white-space: pre-wrap;
   word-wrap: break-word;

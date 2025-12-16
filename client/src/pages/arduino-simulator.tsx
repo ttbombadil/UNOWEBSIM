@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Cpu, Play, Square, Loader2 } from 'lucide-react';
+import { Cpu, Play, Square, Loader2, Terminal, Wrench } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Button } from '@/components/ui/button';
 import { CodeEditor } from '@/components/features/code-editor';
@@ -329,6 +329,12 @@ export default function ArduinoSimulator() {
           }
           if (message.gccStatus !== undefined) {
             setGccStatus(message.gccStatus);
+            // Reset GCC status to idle after a short delay (like CLI)
+            if (message.gccStatus === 'success' || message.gccStatus === 'error') {
+              setTimeout(() => {
+                setGccStatus('idle');
+              }, 2000);
+            }
           }
           if (message.message) {
             setCliOutput(message.message);
@@ -342,6 +348,10 @@ export default function ArduinoSimulator() {
           setGccStatus('error');
           setCompilationStatus('error');
           setSimulationStatus('stopped');
+          // Reset GCC status to idle after a short delay
+          setTimeout(() => {
+            setGccStatus('idle');
+          }, 2000);
           break;
         case 'simulation_status':
           setSimulationStatus(message.status);
@@ -729,22 +739,17 @@ export default function ArduinoSimulator() {
     }
   }
 
-  function compilationStatusLabel(status: string): string {
+  // Replace 'Compilation Successful' with 'Successful' in status label
+  function compilationStatusLabel(status: string) {
     switch (status) {
+      case 'idle':
+        return 'Idle';
       case 'compiling':
         return 'Compiling...';
       case 'success':
-        return 'Compilation Successful';
+        return 'Successful';
       case 'error':
-        return 'Compilation Failed';
-      case 'idle':
-        return 'Idle';
-      case 'ready':
-        return 'Ready';
-      case 'running':
-        return 'Running';
-      case 'stopped':
-        return 'Stopped';
+        return 'Error';
       default:
         return status;
     }
@@ -830,13 +835,31 @@ export default function ArduinoSimulator() {
 
           </div>
 
-          <div className="flex flex-col space-y-1 text-sm w-64">
-            <span className="block whitespace-nowrap overflow-hidden text-ellipsis text-left ">
-              {`CLI: ${compilationStatusLabel(arduinoCliStatus)}`}
-            </span>
-            <span className="block whitespace-nowrap overflow-hidden text-ellipsis text-left ">
-              {`GCC: ${compilationStatusLabel(gccStatus)}`}
-            </span>
+          <div className="flex flex-col space-y-1 text-xs w-32 max-w-full ml-8">
+            <div 
+              className="flex items-center px-1.5 py-1 rounded border border-border bg-muted transition-colors duration-300 w-full min-w-0"
+              style={{
+                backgroundColor: arduinoCliStatus === 'compiling' ? 'rgba(234, 179, 8, 0.10)' :
+                  arduinoCliStatus === 'success' ? 'rgba(34, 197, 94, 0.10)' :
+                  arduinoCliStatus === 'error' ? 'rgba(239, 68, 68, 0.10)' :
+                  'rgba(107, 114, 128, 0.10)'
+              }}
+            >
+              <Terminal className="h-3 w-3 mr-1 flex-shrink-0" />
+              <span className="whitespace-nowrap overflow-hidden text-ellipsis max-w-full">{`CLI: ${compilationStatusLabel(arduinoCliStatus)}`}</span>
+            </div>
+            <div 
+              className="flex items-center px-1.5 py-1 rounded border border-border bg-muted transition-colors duration-300 w-full min-w-0"
+              style={{
+                backgroundColor: gccStatus === 'compiling' ? 'rgba(234, 179, 8, 0.10)' :
+                  gccStatus === 'success' ? 'rgba(34, 197, 94, 0.10)' :
+                  gccStatus === 'error' ? 'rgba(239, 68, 68, 0.10)' :
+                  'rgba(107, 114, 128, 0.10)'
+              }}
+            >
+              <Wrench className="h-3 w-3 mr-1 flex-shrink-0" />
+              <span className="whitespace-nowrap overflow-hidden text-ellipsis max-w-full">{`GCC: ${compilationStatusLabel(gccStatus)}`}</span>
+            </div>
           </div>
 
           <div className="flex items-center space-x-3">
@@ -889,7 +912,7 @@ export default function ArduinoSimulator() {
               <SketchTabs
                 tabs={tabs}
                 activeTabId={activeTabId}
-                modifiedTabId={activeTabId && isModified ? activeTabId : null}
+                modifiedTabId={null}
                 onTabClick={handleTabClick}
                 onTabClose={handleTabClose}
                 onTabRename={handleTabRename}

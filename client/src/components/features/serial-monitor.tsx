@@ -189,9 +189,9 @@ export function SerialMonitor({
 
   return (
     <div className="h-full flex flex-col" data-testid="serial-monitor">
-      <div className="bg-muted px-4 py-2 border-b border-border">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-2">
+      <div className="bg-muted px-4 border-b border-border flex items-center h-10">
+        <div className="flex items-center w-full">
+          <div className="flex items-center space-x-2 flex-shrink-0">
             <div
               className={`w-2 h-2 rounded-full ${isSimulationRunning ? 'bg-green-500 animate-pulse' : 'bg-muted-foreground'}`}
               data-testid="connection-indicator"
@@ -200,8 +200,8 @@ export function SerialMonitor({
             <span className="text-sm font-medium">Serial Monitor</span>
             <span className="text-xs text-muted-foreground">115200 baud</span>
           </div>
-
-          <div className="flex items-center space-x-2">
+          <div className="flex-1" />
+          <div className="flex items-center space-x-2 flex-shrink-0">
             <Button
               variant="ghost"
               size="sm"
@@ -253,15 +253,15 @@ export function SerialMonitor({
         </div>
       </div>
 
-      <div className="border-t border-border p-3 flex-shrink-0">
-        <div className="flex space-x-2">
+      <div className="p-3 flex-shrink-0">
+        <div className="flex space-x-2 items-center">
           <Input
             type="text"
             placeholder="Send to Arduino..."
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            className="flex-1 bg-input border-border text-foreground placeholder-muted-foreground"
+            className="flex-1 bg-input border-border text-foreground placeholder-muted-foreground h-9"
             data-testid="input-serial"
           />
 
@@ -269,7 +269,7 @@ export function SerialMonitor({
             onClick={handleSend}
             size="sm"
             disabled={!inputValue.trim() || !isSimulationRunning}
-            className={`w-40 ${!inputValue.trim() || !isSimulationRunning ? '' : '!bg-green-600 hover:!bg-green-700 !text-white'}`}
+            className={`w-40 h-9 ${!inputValue.trim() || !isSimulationRunning ? '' : '!bg-green-600 hover:!bg-green-700 !text-white'}`}
             data-testid="button-send-serial"
           >
             <Zap className="h-3 w-3 mr-1" />

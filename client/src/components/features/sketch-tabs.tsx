@@ -314,7 +314,7 @@ export function SketchTabs({
   };
 
   return (
-    <div className="flex items-center bg-muted border-b border-border">
+    <div className="flex items-center bg-muted border-b border-border h-10">
       {/* Scroll left button */}
       {canScrollLeft && (
         <Button
