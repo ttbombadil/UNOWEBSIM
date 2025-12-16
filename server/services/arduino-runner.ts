@@ -129,8 +129,8 @@ int main() {
             const timeout = setTimeout(() => {
                 if (this.process) {
                     this.process.kill('SIGKILL');
-                    onError("Sketch runtime timeout");
-                    this.logger.error("Sketch Ausführung Timeout nach 180s");
+                    onOutput("--- Simulation timeout (180s) ---", true);
+                    this.logger.info("Sketch timeout after 180s");
                 }
             }, 180000);
 

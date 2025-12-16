@@ -83,8 +83,13 @@ export class SandboxRunner {
         onExit: (code: number | null) => void,
         onCompileError?: (error: string) => void,
         onCompileSuccess?: () => void,
-        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void
+        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void,
+        timeoutSec?: number // Custom timeout in seconds, 0 = infinite
     ) {
+        // Use custom timeout or default
+        const executionTimeout = timeoutSec !== undefined ? timeoutSec : SANDBOX_CONFIG.maxExecutionTimeSec;
+        this.logger.info(`🕐 runSketch called with timeoutSec=${timeoutSec}, using executionTimeout=${executionTimeout}s`);
+        
         this.isRunning = true;
         this.outputBuffer = "";
         this.errorBuffer = "";
@@ -137,7 +142,7 @@ int main() {
             
             if (this.dockerAvailable && this.dockerImageBuilt) {
                 // Single container: compile AND run (more efficient)
-                this.compileAndRunInDocker(sketchDir, onOutput, onError, onExit, onCompileError, onCompileSuccess, onPinState);
+                this.compileAndRunInDocker(sketchDir, onOutput, onError, onExit, onCompileError, onCompileSuccess, onPinState, executionTimeout);
             } else {
                 // Local fallback: compile then run
                 await this.compileLocal(sketchFile, exeFile, onCompileError);
@@ -145,7 +150,7 @@ int main() {
                 if (onCompileSuccess) {
                     onCompileSuccess();
                 }
-                await this.runLocalWithLimits(exeFile, onOutput, onError, onExit, onPinState);
+                await this.runLocalWithLimits(exeFile, onOutput, onError, onExit, onPinState, executionTimeout);
             }
             
             // Note: Don't cleanup here - cleanup happens in close handler
@@ -179,7 +184,8 @@ int main() {
         onExit: (code: number | null) => void,
         onCompileError?: (error: string) => void,
         onCompileSuccess?: () => void,
-        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void
+        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void,
+        timeoutSec?: number
     ): void {
         // Single container: compile then run using shell
         // Uses sh -c to chain compile && run in one container
@@ -205,15 +211,17 @@ int main() {
         let compileErrorBuffer = "";
         let isCompilePhase = true;
         let compileSuccessSent = false;
+        const effectiveTimeout = timeoutSec !== undefined ? timeoutSec : SANDBOX_CONFIG.maxExecutionTimeSec;
         
         // Custom handler for combined compile+run
-        const timeout = setTimeout(() => {
+        // Only set timeout if not infinite (0)
+        const timeout = effectiveTimeout > 0 ? setTimeout(() => {
             if (this.process) {
                 this.process.kill('SIGKILL');
-                onError(`Timeout nach ${SANDBOX_CONFIG.maxExecutionTimeSec}s`);
-                this.logger.error(`Docker Timeout nach ${SANDBOX_CONFIG.maxExecutionTimeSec}s`);
+                onOutput(`--- Simulation timeout (${effectiveTimeout}s) ---`, true);
+                this.logger.info(`Docker timeout after ${effectiveTimeout}s`);
             }
-        }, SANDBOX_CONFIG.maxExecutionTimeSec * 1000);
+        }, effectiveTimeout * 1000) : null;
 
         this.process?.stdout?.on("data", (data) => {
             const str = data.toString();
@@ -304,7 +312,7 @@ int main() {
         });
 
         this.process?.on("close", (code) => {
-            clearTimeout(timeout);
+            if (timeout) clearTimeout(timeout);
 
             if (this.flushTimer) {
                 clearTimeout(this.flushTimer);
@@ -398,8 +406,11 @@ int main() {
         onOutput: (line: string, isComplete?: boolean) => void,
         onError: (line: string) => void,
         onExit: (code: number | null) => void,
-        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void
+        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void,
+        timeoutSec?: number
     ): Promise<void> {
+        const effectiveTimeout = timeoutSec !== undefined ? timeoutSec : SANDBOX_CONFIG.maxExecutionTimeSec;
+        
         // Make executable
         await chmod(exeFile, 0o755);
         
@@ -407,34 +418,38 @@ int main() {
         // On macOS, we use basic timeout; on Linux we could use cgroups
         const isLinux = process.platform === 'linux';
         
-        if (isLinux) {
+        if (isLinux && effectiveTimeout > 0) {
             // Use timeout and nice for basic limits
             this.process = spawn("timeout", [
-                `${SANDBOX_CONFIG.maxExecutionTimeSec}s`,
+                `${effectiveTimeout}s`,
                 "nice", "-n", "19",  // Lowest priority
                 exeFile
             ]);
         } else {
-            // macOS - just run with timeout
+            // macOS or infinite timeout - just run
             this.process = spawn(exeFile);
         }
 
-        this.setupProcessHandlers(onOutput, onError, onExit, onPinState);
+        this.setupProcessHandlers(onOutput, onError, onExit, onPinState, effectiveTimeout);
     }
 
     private setupProcessHandlers(
         onOutput: (line: string, isComplete?: boolean) => void,
         onError: (line: string) => void,
         onExit: (code: number | null) => void,
-        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void
+        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void,
+        timeoutSec?: number
     ): void {
-        const timeout = setTimeout(() => {
+        const effectiveTimeout = timeoutSec !== undefined ? timeoutSec : SANDBOX_CONFIG.maxExecutionTimeSec;
+        
+        // Only set timeout if not infinite (0)
+        const timeout = effectiveTimeout > 0 ? setTimeout(() => {
             if (this.process) {
                 this.process.kill('SIGKILL');
-                onError(`Sketch runtime timeout (${SANDBOX_CONFIG.maxExecutionTimeSec}s)`);
-                this.logger.error(`Sketch Ausführung Timeout nach ${SANDBOX_CONFIG.maxExecutionTimeSec}s`);
+                onOutput(`--- Simulation timeout (${effectiveTimeout}s) ---`, true);
+                this.logger.info(`Sketch timeout after ${effectiveTimeout}s`);
             }
-        }, SANDBOX_CONFIG.maxExecutionTimeSec * 1000);
+        }, effectiveTimeout * 1000) : null;
 
         this.process?.stdout?.on("data", (data) => {
             const str = data.toString();
@@ -509,7 +524,7 @@ int main() {
         });
 
         this.process?.on("close", (code) => {
-            clearTimeout(timeout);
+            if (timeout) clearTimeout(timeout);
 
             if (this.flushTimer) {
                 clearTimeout(this.flushTimer);

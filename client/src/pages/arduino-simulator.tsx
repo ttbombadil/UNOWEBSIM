@@ -56,6 +56,13 @@ export default function ArduinoSimulator() {
   
   // Pin states for Arduino board visualization
   const [pinStates, setPinStates] = useState<PinState[]>([]);
+  
+  // Simulation timeout setting (in seconds)
+  const [simulationTimeout, setSimulationTimeout] = useState<number>(60);
+  
+  // RX/TX LED activity counters (increment on activity for change detection)
+  const [txActivity, setTxActivity] = useState(0);
+  const [rxActivity, setRxActivity] = useState(0);
 
 
   const { toast } = useToast();
@@ -117,7 +124,8 @@ export default function ArduinoSimulator() {
   // Start simulation mutation
   const startMutation = useMutation({
     mutationFn: async () => {
-      sendMessage({ type: 'start_simulation' });
+      console.log('[Simulation] Starting with timeout:', simulationTimeout);
+      sendMessage({ type: 'start_simulation', timeout: simulationTimeout });
       return { success: true };
     },
     onSuccess: () => {
@@ -279,6 +287,9 @@ export default function ArduinoSimulator() {
           const text = message.data;
           const isComplete = message.isComplete ?? true; // Default to true for backwards compatibility
 
+          // Trigger TX LED blink (Arduino is transmitting data)
+          setTxActivity(prev => prev + 1);
+
           setSerialOutput(prev => {
             const newLines = [...prev];
 
@@ -334,9 +345,10 @@ export default function ArduinoSimulator() {
           break;
         case 'simulation_status':
           setSimulationStatus(message.status);
-          // Reset pin states when simulation stops
+          // Reset pin states and compilation status when simulation stops
           if (message.status === 'stopped') {
             setPinStates([]);
+            setCompilationStatus('ready');
           }
           break;
         case 'pin_state': {
@@ -666,6 +678,9 @@ export default function ArduinoSimulator() {
   };
 
   const handleSerialSend = (message: string) => {
+    // Trigger RX LED blink (Arduino is receiving data)
+    setRxActivity(prev => prev + 1);
+    
     sendMessage({
       type: 'serial_input',
       data: message,
@@ -752,17 +767,66 @@ export default function ArduinoSimulator() {
           <div className="flex items-center space-x-2 text-sm text-muted-foreground">
             <span className="bg-muted px-2 py-1 rounded text-xs">Board: Arduino UNO</span>
             <span className="bg-muted px-2 py-1 rounded text-xs">Baud: 115200</span>
+            <div className="bg-muted px-2 py-1 rounded text-xs flex items-center cursor-pointer hover:bg-muted/80 transition-colors relative">
+              <span className="pointer-events-none">Timeout:</span>
+              <select
+                value={simulationTimeout}
+                onChange={(e) => {
+                  const newTimeout = Number(e.target.value);
+                  console.log('[Timeout] Changed to:', newTimeout);
+                  setSimulationTimeout(newTimeout);
+                }}
+                className="absolute inset-0 opacity-0 cursor-pointer w-full"
+              >
+                <option value={5}>5s</option>
+                <option value={10}>10s</option>
+                <option value={30}>30s</option>
+                <option value={60}>60s</option>
+                <option value={120}>2min</option>
+                <option value={300}>5min</option>
+                <option value={600}>10min</option>
+                <option value={0}>∞</option>
+              </select>
+              <span className="ml-1 pointer-events-none">
+                {simulationTimeout === 0 ? '∞' : 
+                 simulationTimeout >= 60 ? `${simulationTimeout / 60}min` : `${simulationTimeout}s`}
+              </span>
+              <svg className="w-3 h-3 ml-1 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </div>
           </div>
         </div>
 
         <div className="flex items-center space-x-3">
           <div className="flex items-center space-x-2 text-sm">
-            <div className={`w-6 h-6 rounded-full ${compilationStatus === 'compiling' ? 'bg-yellow-500 animate-pulse' :
-              compilationStatus === 'success' ? 'bg-green-500' :
-                compilationStatus === 'error' ? 'bg-red-500' :
-                  compilationStatus === 'ready' ? 'bg-gray-500' :
-                    'bg-blue-500'
-              }`} />
+            <div 
+              className="w-6 h-6 rounded-full"
+              style={{
+                backgroundColor: compilationStatus === 'compiling' ? '#eab308' :
+                  compilationStatus === 'success' ? '#22c55e' :
+                  compilationStatus === 'error' ? '#ef4444' :
+                  compilationStatus === 'ready' ? '#6b7280' : '#3b82f6',
+                boxShadow: compilationStatus === 'success' ? '0 0 12px 3px rgba(34,197,94,0.6)' : 
+                  compilationStatus === 'error' ? '0 0 12px 3px rgba(239,68,68,0.6)' : 'none',
+                transition: 'background-color 500ms ease-in-out, box-shadow 500ms ease-in-out',
+                animation: (compilationStatus === 'compiling' || compilationStatus === 'success') 
+                  ? 'gentle-pulse 3s ease-in-out infinite' 
+                  : compilationStatus === 'error' 
+                  ? 'error-blink 0.3s ease-in-out 5' 
+                  : 'none'
+              }}
+            />
+            <style>{`
+              @keyframes gentle-pulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.7; }
+              }
+              @keyframes error-blink {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.6; }
+              }
+            `}</style>
 
           </div>
 
@@ -877,6 +941,8 @@ export default function ArduinoSimulator() {
                 <ArduinoBoard
                   pinStates={pinStates}
                   isSimulationRunning={simulationStatus === 'running'}
+                  txActive={txActivity}
+                  rxActive={rxActivity}
                 />
               </ResizablePanel>
             </ResizablePanelGroup>

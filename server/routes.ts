@@ -253,6 +253,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
               // Track if we've sent compile success
               let gccSuccessSent = false;
 
+              // Extract timeout from message (for start_simulation type)
+              const timeoutValue = 'timeout' in data ? data.timeout : undefined;
+              logger.info(`[Simulation] Starting with timeout: ${timeoutValue}s`);
+
               // Start genuine C++ execution with isComplete support!
               clientState.runner.runSketch(
                 lastCompiledCode,
@@ -295,7 +299,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                       }
                       sendMessageToClient(ws, {
                         type: 'serial_output',
-                        data: '--- Simulation beendet: Loop-Durchläufe abgeschlossen ---\n',
+                        data: '--- Simulation ended: Loop cycles completed ---\n',
                         isComplete: true
                       });
                       sendMessageToClient(ws, {
@@ -347,7 +351,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
                     stateType: type,
                     value
                   });
-                }
+                },
+                timeoutValue // Custom timeout in seconds (0 = infinite)
               );
             }
             break;

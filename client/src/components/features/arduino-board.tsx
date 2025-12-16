@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { Cpu } from 'lucide-react';
 
 interface PinState {
@@ -11,6 +11,8 @@ interface PinState {
 interface ArduinoBoardProps {
   pinStates?: PinState[];
   isSimulationRunning?: boolean;
+  txActive?: number; // TX activity counter (changes trigger blink)
+  rxActive?: number; // RX activity counter (changes trigger blink)
 }
 
 // Digital pin positions in the SVG (x coordinates, y=19 for all)
@@ -35,8 +37,32 @@ const DIGITAL_PIN_POSITIONS: { [key: number]: { x: number; y: number } } = {
 export function ArduinoBoard({
   pinStates = [],
   isSimulationRunning = false,
+  txActive = 0,
+  rxActive = 0,
 }: ArduinoBoardProps) {
   const [svgContent, setSvgContent] = useState<string>('');
+  const [txBlink, setTxBlink] = useState(false);
+  const [rxBlink, setRxBlink] = useState(false);
+  const txTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const rxTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Handle TX blink (stays on for 100ms after activity)
+  useEffect(() => {
+    if (txActive > 0) {
+      setTxBlink(true);
+      if (txTimeoutRef.current) clearTimeout(txTimeoutRef.current);
+      txTimeoutRef.current = setTimeout(() => setTxBlink(false), 100);
+    }
+  }, [txActive]);
+
+  // Handle RX blink (stays on for 100ms after activity)
+  useEffect(() => {
+    if (rxActive > 0) {
+      setRxBlink(true);
+      if (rxTimeoutRef.current) clearTimeout(rxTimeoutRef.current);
+      rxTimeoutRef.current = setTimeout(() => setRxBlink(false), 100);
+    }
+  }, [rxActive]);
 
   useEffect(() => {
     // Load SVG content
@@ -48,18 +74,26 @@ export function ArduinoBoard({
       .catch(err => console.error('Failed to load Arduino SVG:', err));
   }, []);
 
+  // PWM-capable pins on Arduino UNO
+  const PWM_PINS = [3, 5, 6, 9, 10, 11];
+
   // Get the color for a digital pin based on its state
   const getPinColor = (pin: number): string => {
     const state = pinStates.find(p => p.pin === pin);
     if (!state) return 'transparent'; // No state = no overlay
     
     if (state.mode === 'OUTPUT') {
-      if (state.value > 0) {
-        // HIGH = bright green glow
-        return '#00ff00';
-      } else {
-        // LOW = red
+      // Check if this is a PWM pin with analog value
+      if (state.type === 'pwm' && PWM_PINS.includes(pin)) {
+        // PWM: interpolate between black (0) and red (255)
+        const intensity = Math.round((state.value / 255) * 255);
+        return `rgb(${intensity}, 0, 0)`;
+      } else if (state.value > 0) {
+        // HIGH (5V) = red
         return '#ff0000';
+      } else {
+        // LOW (0V) = black
+        return '#000000';
       }
     } else if (state.mode === 'INPUT' || state.mode === 'INPUT_PULLUP') {
       // Input mode = yellow
@@ -117,6 +151,49 @@ export function ArduinoBoard({
       modified = modified.replace(
         /<rect id="rect23418" class="st33"/g,
         '<rect id="rect23418" style="fill: #1a3d1a; fill-opacity: 0.6;"'
+      );
+    }
+    
+    // L LED (rect23416 - Pin 13 LED, yellow, at x=127.2, y=50.3)
+    // This should light up when pin 13 is HIGH
+    const pin13State = pinStates.find(p => p.pin === 13);
+    if (pin13State && pin13State.value > 0) {
+      modified = modified.replace(
+        /<rect id="rect23416" class="st34"/g,
+        '<rect id="rect23416" style="fill: #ffff00; filter: drop-shadow(0 0 4px #ffff00);"'
+      );
+    } else {
+      modified = modified.replace(
+        /<rect id="rect23416" class="st34"/g,
+        '<rect id="rect23416" style="fill: #3d3d1a; fill-opacity: 0.6;"'
+      );
+    }
+    
+    // TX LED (led-06033 group, rect at x=126.1, y=66.9)
+    // ID: _x30_.1.11.0.0.0.0.0.1.0
+    if (txBlink) {
+      modified = modified.replace(
+        /<rect id="_x30_.1.11.0.0.0.0.0.1.0" class="st39"/g,
+        '<rect id="_x30_.1.11.0.0.0.0.0.1.0" style="fill: #ffff00; filter: drop-shadow(0 0 4px #ffff00); transition: fill 50ms ease-in-out, filter 50ms ease-in-out;"'
+      );
+    } else {
+      modified = modified.replace(
+        /<rect id="_x30_.1.11.0.0.0.0.0.1.0" class="st39"/g,
+        '<rect id="_x30_.1.11.0.0.0.0.0.1.0" style="fill: #3d3d1a; fill-opacity: 0.6; transition: fill 50ms ease-in-out, filter 50ms ease-in-out;"'
+      );
+    }
+    
+    // RX LED (led-06032 group, rect at x=126.1, y=75)
+    // ID: _x30_.1.10.0.0.0.0.0.1.0
+    if (rxBlink) {
+      modified = modified.replace(
+        /<rect id="_x30_.1.10.0.0.0.0.0.1.0" class="st39"/g,
+        '<rect id="_x30_.1.10.0.0.0.0.0.1.0" style="fill: #ffff00; filter: drop-shadow(0 0 4px #ffff00); transition: fill 50ms ease-in-out, filter 50ms ease-in-out;"'
+      );
+    } else {
+      modified = modified.replace(
+        /<rect id="_x30_.1.10.0.0.0.0.0.1.0" class="st39"/g,
+        '<rect id="_x30_.1.10.0.0.0.0.0.1.0" style="fill: #3d3d1a; fill-opacity: 0.6; transition: fill 50ms ease-in-out, filter 50ms ease-in-out;"'
       );
     }
     
