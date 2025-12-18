@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
-import { Cpu } from 'lucide-react';
+import { Cpu, Eye, EyeOff } from 'lucide-react';
 
 interface PinState {
   pin: number;
@@ -45,6 +45,7 @@ export function ArduinoBoard({
   const [svgContent, setSvgContent] = useState<string>('');
   const [txBlink, setTxBlink] = useState(false);
   const [rxBlink, setRxBlink] = useState(false);
+  const [showPWMValues, setShowPWMValues] = useState(false);
   const txTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const rxTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -152,6 +153,26 @@ export function ArduinoBoard({
           />
         `;
       }
+
+      // Add PWM value text if enabled and pin is PWM
+      if (showPWMValues && PWM_PINS.includes(pin)) {
+        const state = pinStates.find(p => p.pin === pin);
+        if (state && state.type === 'pwm') {
+          overlays += `
+            <text x="${pos.x}" y="${pos.y - 15}" 
+              text-anchor="middle" 
+              dominant-baseline="middle"
+              font-size="6" 
+              fill="white" 
+              font-family="Arial, sans-serif" 
+              font-weight="bold"
+              transform="rotate(-90 ${pos.x} ${pos.y - 15})"
+              style="text-shadow: 1px 1px 1px black;">
+              ${state.value}
+            </text>
+          `;
+        }
+      }
     }
     
     return overlays;
@@ -258,6 +279,14 @@ export function ArduinoBoard({
           />
           <span className="text-sm font-medium">Arduino UNO Board</span>
         </div>
+        <button
+          onClick={() => setShowPWMValues(!showPWMValues)}
+          className="flex items-center space-x-1 px-2 py-1 text-xs bg-background border border-border rounded hover:bg-accent transition-colors"
+          title={showPWMValues ? 'Hide PWM Values' : 'Show PWM Values'}
+        >
+          {showPWMValues ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+          <span>PWM</span>
+        </button>
       </div>
 
       {/* Board Visualization */}
