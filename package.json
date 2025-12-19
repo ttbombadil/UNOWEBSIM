@@ -5,7 +5,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "DISABLE_RATE_LIMIT=true tsx server/index.ts --host",
-    "dev:full": "concurrently \"npm run dev\" \"npm run dev:client\"",
+    "dev:full": "npm run dev & sleep 3 && npm run dev:client",
     "dev:client": "vite",
     "build": "npm run build:client && npm run build:server && npm run build:copy-public",
     "build:client": "vite build client/ --config vite.config.ts",
