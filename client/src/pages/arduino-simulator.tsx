@@ -1128,7 +1128,7 @@ export default function ArduinoSimulator() {
           {/* Right Panel - Output & Serial Monitor */}
           <ResizablePanel defaultSize={50} minSize={20} id="output-panel">
             <ResizablePanelGroup direction="vertical" id="output-layout">
-              <ResizablePanel defaultSize={33} minSize={15} id="compilation-panel">
+              <ResizablePanel defaultSize={25} minSize={15} id="compilation-panel">
                 <CompilationOutput
                   output={cliOutput}
                   onClear={handleClearCompilationOutput}
@@ -1137,7 +1137,7 @@ export default function ArduinoSimulator() {
 
               <ResizableHandle withHandle data-testid="vertical-resizer" />
 
-              <ResizablePanel defaultSize={33} minSize={15} id="serial-panel">
+              <ResizablePanel defaultSize={25} minSize={15} id="serial-panel">
                 <SerialMonitor
                   output={serialOutput}
                   isConnected={isConnected}
@@ -1149,7 +1149,7 @@ export default function ArduinoSimulator() {
 
               <ResizableHandle withHandle data-testid="vertical-resizer-board" />
 
-              <ResizablePanel defaultSize={34} minSize={15} id="board-panel">
+              <ResizablePanel defaultSize={50} minSize={15} id="board-panel">
                 <ArduinoBoard
                   pinStates={pinStates}
                   isSimulationRunning={simulationStatus === 'running'}
