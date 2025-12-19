@@ -354,6 +354,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
             }
             break;
 
+          case 'code_changed':
+            {
+              logger.info('Received code_changed message');
+              const clientState = clientRunners.get(ws);
+              if (clientState?.runner && clientState?.isRunning) {
+                logger.info('Stopping simulation due to code change');
+                clientState.runner.stop();
+                clientState.isRunning = false;
+                sendMessageToClient(ws, {
+                  type: 'simulation_status',
+                  status: 'stopped',
+                });
+                sendMessageToClient(ws, {
+                  type: 'serial_output',
+                  data: 'Simulation stopped due to code change\n',
+                });
+                logger.info('Simulation stopped due to code change');
+              } else {
+                logger.info('No running simulation to stop');
+              }
+            }
+            break;
+
           case 'stop_simulation':
             {
               const clientState = clientRunners.get(ws);

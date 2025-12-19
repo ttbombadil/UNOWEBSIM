@@ -530,12 +530,15 @@ export default function ArduinoSimulator() {
   }, [messageQueue, consumeMessages]);
 
   const handleCodeChange = (newCode: string) => {
+    console.log('handleCodeChange called, simulationStatus:', simulationStatus);
     setCode(newCode);
     setIsModified(true);
     
     // Stop simulation when user edits the code
+    console.log('Sending code_changed message');
+    sendMessage({ type: 'code_changed' });
     if (simulationStatus === 'running') {
-      stopMutation.mutate();
+      setSimulationStatus('stopped');
     }
     
     // Update the active tab content

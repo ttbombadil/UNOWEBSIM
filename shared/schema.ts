@@ -39,6 +39,9 @@ export const wsMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("stop_simulation"),
   }),
   z.object({
+    type: z.literal("code_changed"),
+  }),
+  z.object({
     type: z.literal("compilation_error"),
     data: z.string(),
   }),
