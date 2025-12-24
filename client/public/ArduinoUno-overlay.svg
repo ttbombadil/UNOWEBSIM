@@ -36,7 +36,7 @@
   </defs>
 
   <!-- Board outline for visual check (from original path _x30_.1.0.0) -->
-  <g id="board-outline" opacity="0.3">
+  <g id="board-outline" opacity="0">
     <path fill="none" stroke="#0f7391" stroke-width="1" d="M260.8,10l5.4,5.4v40.5l9,9v116.1l-9,9v5.4c0,2-1.6,3.5-3.5,3.5H35.8c-2,0-3.5-1.6-3.5-3.5h0V13.5c0-2,1.6-3.5,3.5-3.5h225.1"/>
     <!-- Mounting holes -->
     <circle cx="266.2" cy="73" r="5.7" fill="none" stroke="#0f7391"/>

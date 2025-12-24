@@ -34,6 +34,13 @@ export function ArduinoBoard({
   onPinToggle,
 }: ArduinoBoardProps) {
   const [svgContent, setSvgContent] = useState<string>('');
+  const [boardColor, setBoardColor] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem('unoBoardColor') || '#0f7391';
+    } catch {
+      return '#0f7391';
+    }
+  });
   const [overlaySvgContent, setOverlaySvgContent] = useState<string>('');
   const [txBlink, setTxBlink] = useState(false);
   const [rxBlink, setRxBlink] = useState(false);
@@ -73,6 +80,21 @@ export function ArduinoBoard({
         setOverlaySvgContent(overlay);
       })
       .catch(err => console.error('Failed to load Arduino SVGs:', err));
+  }, []);
+
+  // Listen for color changes from secret dialog (custom event)
+  useEffect(() => {
+    const onColor = (e: Event) => {
+      try {
+        const detail = (e as CustomEvent).detail as { color?: string } | undefined;
+        const color = detail?.color || window.localStorage.getItem('unoBoardColor') || '#0f7391';
+        setBoardColor(color);
+      } catch {
+        // ignore
+      }
+    };
+    document.addEventListener('arduinoColorChange', onColor as EventListener);
+    return () => document.removeEventListener('arduinoColorChange', onColor as EventListener);
   }, []);
 
   // Get pin color based on state
@@ -330,6 +352,11 @@ export function ArduinoBoard({
     if (!svgContent) return '';
     let modified = svgContent;
     modified = modified.replace(/<\?xml[^?]*\?>/g, '');
+    // Replace the default board color (#0f7391) in the SVG with the chosen color.
+    // We replace hex occurrences case-insensitively.
+    try {
+      modified = modified.replace(/#0f7391/gi, boardColor);
+    } catch {}
     modified = modified.replace(
       /<svg([^>]*)>/,
       `<svg$1 style="width: 100%; height: 100%; display: block;" preserveAspectRatio="xMidYMid meet">`
