@@ -12,6 +12,8 @@ import { Button } from "@/components/ui/button";
 
 const STORAGE_KEY = "unoBoardColor";
 const DEFAULT_COLOR = "#0f7391";
+const TOAST_DURATION_KEY = "unoToastDuration"
+const DEFAULT_TOAST_SECONDS = 3
 
 export default function SecretDialog({
   open,
@@ -136,7 +138,9 @@ export default function SecretDialog({
 
           {/* Placeholder for future secret features */}
           <div className="rounded border p-3 bg-muted">
-            <div className="font-medium">More features coming...</div>
+            <div className="font-medium">Toast Duration</div>
+            <div className="text-xs text-muted-foreground mb-2">Change global toast expiry (0.5s steps). Choose "Infinite" to disable auto-hide.</div>
+            <ToastDurationControl />
           </div>
         </div>
 
@@ -153,4 +157,65 @@ export default function SecretDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+function ToastDurationControl() {
+  const [sliderVal, setSliderVal] = React.useState<number>(() => {
+    try {
+      const v = window.localStorage.getItem(TOAST_DURATION_KEY)
+      if (v === null) return DEFAULT_TOAST_SECONDS * 2 // slider steps are 0.5s, so value = seconds*2
+      if (v === "infinite") return 21
+      const ms = parseInt(v, 10)
+      if (Number.isNaN(ms)) return DEFAULT_TOAST_SECONDS * 2
+      const computed = Math.round((ms / 1000) * 2)
+      if (computed < 1) return 1
+      if (computed > 20) return 20
+      return computed
+    } catch {
+      return DEFAULT_TOAST_SECONDS * 2
+    }
+  })
+
+  const updateStored = (val: number) => {
+    try {
+      if (val === 21) {
+        window.localStorage.setItem(TOAST_DURATION_KEY, "infinite")
+      } else {
+        const ms = Math.round((val / 2) * 1000)
+        window.localStorage.setItem(TOAST_DURATION_KEY, String(ms))
+      }
+      // dispatch event for any listeners
+      const ev = new CustomEvent("toastDurationChange", { detail: { value: val } })
+      document.dispatchEvent(ev)
+    } catch {}
+  }
+
+  React.useEffect(() => {
+    updateStored(sliderVal)
+  }, [])
+
+  const onChange = (v: number) => {
+    setSliderVal(v)
+    updateStored(v)
+  }
+
+  const label = sliderVal === 21 ? "Infinite" : `${(sliderVal / 2).toFixed(1)}s`
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <div className="text-sm">Duration: <span className="font-medium">{label}</span></div>
+        <div className="text-xs text-muted-foreground">Step: 0.5s</div>
+      </div>
+      <input
+        type="range"
+        min={1}
+        max={21}
+        step={1}
+        value={sliderVal}
+        onChange={(e) => onChange(Number(e.target.value))}
+        aria-label="toast duration"
+      />
+    </div>
+  )
 }
