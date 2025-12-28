@@ -72,6 +72,12 @@ export default function ArduinoSimulator() {
   // RX/TX LED activity counters (increment on activity for change detection)
   const [txActivity, setTxActivity] = useState(0);
   const [rxActivity, setRxActivity] = useState(0);
+  // Track the last scheduled display timestamp for serial output (epoch ms)
+  const lastSerialDisplayRef = useRef<number>(Date.now());
+  // Track wall-clock time when last serial_event was received
+  const lastSerialEventAtRef = useRef<number>(0);
+  // Queue for incoming serial_events to be processed in order
+  const [serialEventQueue, setSerialEventQueue] = useState<Array<{payload: any, receivedAt: number}>>([]);
 
   // Backend availability tracking
   const [backendReachable, setBackendReachable] = useState(true);
@@ -258,6 +264,8 @@ export default function ArduinoSimulator() {
     },
     onSuccess: () => {
       setSimulationStatus('stopped');
+      // Clear serial event queue to prevent buffered characters from appearing after stop
+      setSerialEventQueue([]);
     },
   });
 
@@ -437,6 +445,15 @@ export default function ArduinoSimulator() {
           // Trigger TX LED blink (Arduino is transmitting data)
           setTxActivity(prev => prev + 1);
 
+          // If we recently received structured `serial_event` messages, ignore legacy `serial_output` to avoid duplicates
+          const now = Date.now();
+          if (lastSerialEventAtRef.current && (now - lastSerialEventAtRef.current) < 1000) {
+            // Short-circuit: drop this legacy serial_output
+            // eslint-disable-next-line no-console
+            console.debug('Dropping legacy serial_output because recent serial_event exists', { text, ageMs: now - lastSerialEventAtRef.current });
+            break;
+          }
+
           // Remove trailing newlines from text (they are represented by isComplete flag)
           const isNewlineOnly = text === '\n' || text === '\r\n';
           if (isNewlineOnly) {
@@ -478,6 +495,33 @@ export default function ArduinoSimulator() {
           });
           break;
         }
+          case 'serial_event': {
+            // Only queue serial events if simulation is running
+            if (simulationStatus === 'running') {
+              const payload = (message as any).payload || {};
+              // Record arrival time so we can suppress duplicate legacy serial_output messages
+              const receivedAt = Date.now();
+              lastSerialEventAtRef.current = receivedAt;
+              // Debug: log incoming payloads to console to help diagnose ordering issues
+              // eslint-disable-next-line no-console
+              console.debug('[serial_event recv]', { payload, receivedAt });
+              // Deduplicate: if last queued event has same ts_write and data, skip
+              setSerialEventQueue(prev => {
+                const last = prev.length > 0 ? prev[prev.length - 1] : null;
+                try {
+                  if (last && last.payload && payload && last.payload.ts_write === payload.ts_write && last.payload.data === payload.data) {
+                    // eslint-disable-next-line no-console
+                    console.debug('Dedup serial_event skipped', { ts_write: payload.ts_write });
+                    return prev;
+                  }
+                } catch (e) {
+                  // ignore comparison errors
+                }
+                return [...prev, { payload, receivedAt }];
+              });
+            }
+            break;
+          }
         case 'compilation_status':
           if (message.arduinoCliStatus !== undefined) {
             setArduinoCliStatus(message.arduinoCliStatus);
@@ -793,6 +837,72 @@ export default function ArduinoSimulator() {
       return newStates;
     });
   }, [simulationStatus, analogPinsUsed, detectedPinModes]);
+
+  // Process queued serial events in order
+  useEffect(() => {
+    if (serialEventQueue.length === 0) return;
+
+    // Sort events by original write timestamp when available (fallback to receivedAt)
+    const sortedEvents = [...serialEventQueue].sort((a, b) => {
+      const ta = (a.payload && typeof a.payload.ts_write === 'number') ? a.payload.ts_write : a.receivedAt;
+      const tb = (b.payload && typeof b.payload.ts_write === 'number') ? b.payload.ts_write : b.receivedAt;
+      return ta - tb;
+    });
+
+    // Process events sequentially, building a buffer
+    let buffer = '';
+    let newLines: OutputLine[] = [...serialOutput];
+
+    for (const { payload } of sortedEvents) {
+      // Normalize data: ensure string and strip CR characters
+      const piece: string = (payload.data || '').toString();
+      buffer += piece.replace(/\r/g, '');
+
+      // Process complete lines
+      while (buffer.includes('\n')) {
+        const pos = buffer.indexOf('\n');
+        const toProcess = buffer.substring(0, pos + 1);
+        buffer = buffer.substring(pos + 1);
+
+        const lines = toProcess.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          if (i < lines.length - 1) {
+            // Complete lines
+            if (newLines.length === 0 || newLines[newLines.length - 1].complete) {
+              newLines.push({ text: line, complete: true });
+            } else {
+              newLines[newLines.length - 1].text += line;
+              newLines[newLines.length - 1].complete = true;
+            }
+          } else {
+            // Last part, incomplete
+            if (line) {
+              if (newLines.length === 0 || newLines[newLines.length - 1].complete) {
+                newLines.push({ text: line, complete: false });
+              } else {
+                newLines[newLines.length - 1].text += line;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Process remaining buffer as incomplete line
+    if (buffer) {
+      if (newLines.length === 0 || newLines[newLines.length - 1].complete) {
+        newLines.push({ text: buffer, complete: false });
+      } else {
+        newLines[newLines.length - 1].text += buffer;
+      }
+    }
+
+    setSerialOutput(newLines);
+
+    // Clear queue after processing
+    setSerialEventQueue([]);
+  }, [serialEventQueue]);
 
   // Tab management handlers
   const handleTabClick = (tabId: string) => {

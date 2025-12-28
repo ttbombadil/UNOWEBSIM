@@ -42,6 +42,9 @@ export class SandboxRunner {
     private isSendingOutput = false; // Flag to prevent overlapping sends
     private flushTimer: NodeJS.Timeout | null = null;
     private pendingIncomplete = false;
+    // Buffer for coalescing SERIAL_EVENTs emitted by the C++ mock
+    private pendingSerialEvents: Array<any> = [];
+    private pendingSerialFlushTimer: NodeJS.Timeout | null = null;
 
     constructor() {
         mkdir(this.tempDir, { recursive: true })
@@ -49,6 +52,37 @@ export class SandboxRunner {
         
         // Check Docker availability on startup
         this.checkDockerAvailability();
+    }
+
+    private flushPendingSerialEvents(onOutput: (line: string, isComplete?: boolean) => void) {
+        if (this.pendingSerialEvents.length === 0) return;
+
+        // Sort by ts_write to ensure chronological order
+        const events = this.pendingSerialEvents.slice().sort((a, b) => (a.ts_write || 0) - (b.ts_write || 0));
+
+        // Concatenate data and take earliest ts_write
+        const combinedData = events.map(e => e.data || '').join('');
+        const earliestTs = events.reduce((min, e) => Math.min(min, e.ts_write || Infinity), Infinity);
+        const event = {
+            type: 'serial',
+            ts_write: isFinite(earliestTs) ? earliestTs : Date.now(),
+            data: combinedData,
+            baud: this.baudrate,
+            bits_per_frame: 10,
+            txBufferBefore: this.outputBuffer.length,
+            txBufferCapacity: 1000,
+            blocking: true,
+            atomic: true
+        };
+
+        try {
+            onOutput('[[' + 'SERIAL_EVENT_JSON:' + JSON.stringify(event) + ']]', true);
+        } catch (err) {
+            this.logger.warn(`Failed to flush pending serial events: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        // Clear pending buffer
+        this.pendingSerialEvents = [];
     }
 
     private checkDockerAvailability(): void {
@@ -214,6 +248,8 @@ int main() {
         ]);
 
         this.logger.info("🚀 Docker: Compile + Run in single container");
+        // Record server-side absolute start time for the spawned process so we can convert C++ millis()
+        this.processStartTime = Date.now();
         
         let compileErrorBuffer = "";
         let isCompilePhase = true;
@@ -312,9 +348,53 @@ int main() {
                         // stdin received confirmation - log to server
                         this.logger.info(`[C++ STDIN RECV] ${stdinRecvMatch[1]}`);
                     } else {
-                        // Only log and send actual errors, not protocol messages
-                        this.logger.warn(`[STDERR]: ${line}`);
-                        onError(line);
+                        // New: detect structured serial events emitted by the mock
+                        const serialEventMatch = line.match(/\[\[SERIAL_EVENT:(\d+):([A-Za-z0-9+/=]+)\]\]/);
+                        if (serialEventMatch) {
+                            try {
+                                const ts = parseInt(serialEventMatch[1], 10);
+                                const b64 = serialEventMatch[2];
+                                const buf = Buffer.from(b64, 'base64');
+                                const decoded = buf.toString('utf8');
+                                // Build event payload for frontend reconstruction
+                                const event = {
+                                    type: 'serial',
+                                    ts_write: (this.processStartTime || Date.now()) + ts,
+                                    data: decoded,
+                                    baud: this.baudrate,
+                                    bits_per_frame: 10,
+                                    txBufferBefore: this.outputBuffer.length,
+                                    txBufferCapacity: 1000,
+                                    blocking: true,
+                                    atomic: true
+                                };
+                                // Coalesce closely timed SERIAL_EVENTs to avoid fragmentation/reordering
+                                // Debug log each raw serial event received
+                                this.logger.debug(`[SERIAL_EVENT RECEIVED] ts=${event.ts_write} len=${(event.data||'').length} txBuf=${event.txBufferBefore}`);
+                                this.pendingSerialEvents.push(event);
+                                if (!this.pendingSerialFlushTimer) {
+                                    // Slightly larger window to gather fragments and reduce reordering artifacts
+                                    const COALESCE_MS = 20;
+                                    this.pendingSerialFlushTimer = setTimeout(() => {
+                                        try {
+                                            this.logger.debug(`[SERIAL_EVENT FLUSH] flushing ${this.pendingSerialEvents.length} pending events`);
+                                            this.flushPendingSerialEvents(onOutput);
+                                        } finally {
+                                            if (this.pendingSerialFlushTimer) {
+                                                clearTimeout(this.pendingSerialFlushTimer);
+                                                this.pendingSerialFlushTimer = null;
+                                            }
+                                        }
+                                    }, COALESCE_MS);
+                                }
+                            } catch (e) {
+                                this.logger.warn(`Failed to parse SERIAL_EVENT: ${e instanceof Error ? e.message : String(e)}`);
+                            }
+                        } else {
+                            // Only log and send actual errors, not protocol messages
+                            this.logger.warn(`[STDERR]: ${line}`);
+                            onError(line);
+                        }
                     }
                 }
             });
@@ -438,9 +518,11 @@ int main() {
                 "nice", "-n", "19",  // Lowest priority
                 exeFile
             ]);
+            this.processStartTime = Date.now();
         } else {
             // macOS or infinite timeout - just run
             this.process = spawn(exeFile);
+            this.processStartTime = Date.now();
         }
 
         this.setupProcessHandlers(onOutput, onError, onExit, onPinState, effectiveTimeout);
@@ -512,9 +594,34 @@ int main() {
                         const value = parseInt(pinPwmMatch[2]);
                         onPinState(pin, 'pwm', value);
                     } else {
-                        // Regular error message
-                        this.logger.warn(`[STDERR line]: ${JSON.stringify(line)}`);
-                        onError(line);
+                        // Detect structured serial events emitted by the mock
+                        const serialEventMatch = line.match(/\[\[SERIAL_EVENT:(\d+):([A-Za-z0-9+/=]+)\]\]/);
+                        if (serialEventMatch) {
+                            try {
+                                const ts = parseInt(serialEventMatch[1], 10);
+                                const b64 = serialEventMatch[2];
+                                const buf = Buffer.from(b64, 'base64');
+                                const decoded = buf.toString('utf8');
+                                const event = {
+                                    type: 'serial',
+                                    ts_write: (this.processStartTime || Date.now()) + ts,
+                                    data: decoded,
+                                    baud: this.baudrate,
+                                    bits_per_frame: 10,
+                                    txBufferBefore: this.outputBuffer.length,
+                                    txBufferCapacity: 1000,
+                                    blocking: true,
+                                    atomic: true
+                                };
+                                onOutput('[[' + 'SERIAL_EVENT_JSON:' + JSON.stringify(event) + ']]', true);
+                            } catch (e) {
+                                this.logger.warn(`Failed to parse SERIAL_EVENT: ${e instanceof Error ? e.message : String(e)}`);
+                            }
+                        } else {
+                            // Regular error message
+                            this.logger.warn(`[STDERR line]: ${JSON.stringify(line)}`);
+                            onError(line);
+                        }
                     }
                 }
             });

@@ -255,7 +255,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               logger.info(`[Simulation] Starting with timeout: ${timeoutValue}s`);
 
               // Start genuine C++ execution with isComplete support!
-              clientState.runner.runSketch(
+                clientState.runner.runSketch(
                 lastCompiledCode,
                 (line: string, isComplete?: boolean) => {
                   // First output means compilation succeeded
@@ -266,11 +266,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
                       gccStatus: 'success',
                     });
                   }
-                  sendMessageToClient(ws, {
-                    type: 'serial_output',
-                    data: line,
-                    isComplete: isComplete ?? true
-                  });
+                  // Backwards-compatible: detect wrapped SERIAL_EVENT JSON sent by backend
+                  const serialWrapMatch = typeof line === 'string' && line.startsWith('[[SERIAL_EVENT_JSON:') && line.endsWith(']]');
+                  if (serialWrapMatch) {
+                    try {
+                      const jsonStr = line.slice('[[SERIAL_EVENT_JSON:'.length, -2);
+                      const payload = JSON.parse(jsonStr);
+                      sendMessageToClient(ws, {
+                        type: 'serial_event',
+                        payload
+                      });
+                    } catch (err) {
+                      // Fall back to raw output if parsing fails
+                      sendMessageToClient(ws, {
+                        type: 'serial_output',
+                        data: line,
+                        isComplete: isComplete ?? true
+                      });
+                    }
+                  } else {
+                    sendMessageToClient(ws, {
+                      type: 'serial_output',
+                      data: line,
+                      isComplete: isComplete ?? true
+                    });
+                  }
                 },
                 (err: string) => {
                   logger.warn(`[Client WS][ERR]: ${err}`);

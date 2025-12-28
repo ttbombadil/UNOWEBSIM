@@ -249,6 +249,7 @@ private:
     unsigned long _timeout = 1000; // Default timeout 1 second
     bool initialized = false;
     long _baudrate = 9600;
+    std::string lineBuffer; // Buffer to accumulate output until newline
     
     // Simulate serial transmission delay for n characters
     // 10 bits per char: start + 8 data + stop
@@ -267,15 +268,50 @@ private:
         }
     }
     
-    // Output string with baud-rate delay (like real Arduino)
+    // Base64 encoder helper
+    static std::string base64_encode(const std::string &in) {
+        static const std::string b64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string out;
+        int val=0, valb=-6;
+        for (unsigned char c : in) {
+            val = (val<<8) + c;
+            valb += 8;
+            while (valb>=0) {
+                out.push_back(b64_chars[(val>>valb)&0x3F]);
+                valb-=6;
+            }
+        }
+        if (valb>-6) out.push_back(b64_chars[((val<<8)>>(valb+8))&0x3F]);
+        while (out.size()%4) out.push_back('=');
+        return out;
+    }
+
+    // Flush the line buffer as a single SERIAL_EVENT
+    void flushLineBuffer() {
+        if (lineBuffer.empty()) return;
+        unsigned long ts = millis();
+        std::string enc = base64_encode(lineBuffer);
+        std::cerr << "[[SERIAL_EVENT:" << ts << ":" << enc << "]]" << std::endl;
+        // Simulate transmit time for the whole buffer
+        txDelay(lineBuffer.length());
+        lineBuffer.clear();
+    }
+
+    // Output string - buffer until newline to prevent interleaving
     void serialWrite(const std::string& s) {
-        std::cout << s << std::flush;
-        txDelay(s.length());
+        for (char c : s) {
+            lineBuffer += c;
+            if (c == '\\n') {
+                flushLineBuffer();
+            }
+        }
     }
     
     void serialWrite(char c) {
-        std::cout << c << std::flush;
-        txDelay(1);
+        lineBuffer += c;
+        if (c == '\\n') {
+            flushLineBuffer();
+        }
     }
     
 public:
