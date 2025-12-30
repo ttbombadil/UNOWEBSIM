@@ -276,7 +276,7 @@ class Map {
 Map myMap(30, 10);
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   for (byte i = 0; i < 5; i++)
   {
     // Generate random map

@@ -32,11 +32,28 @@ export const wsMessageSchema = z.discriminatedUnion("type", [
     data: z.string(),
   }),
   z.object({
+    type: z.literal("serial_event"),
+    payload: z.object({
+      type: z.string(),
+      ts_write: z.number(),
+      data: z.string(),
+      baud: z.number(),
+      bits_per_frame: z.number(),
+      txBufferBefore: z.number().optional(),
+      txBufferCapacity: z.number().optional(),
+      blocking: z.boolean().optional(),
+      atomic: z.boolean().optional(),
+    }),
+  }),
+  z.object({
     type: z.literal("start_simulation"),
     timeout: z.number().optional(), // Timeout in seconds, 0 = infinite
   }),
   z.object({
     type: z.literal("stop_simulation"),
+  }),
+  z.object({
+    type: z.literal("code_changed"),
   }),
   z.object({
     type: z.literal("compilation_error"),
@@ -56,6 +73,11 @@ export const wsMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("pin_state"),
     pin: z.number(),
     stateType: z.enum(["mode", "value", "pwm"]),
+    value: z.number(),
+  }),
+  z.object({
+    type: z.literal("set_pin_value"),
+    pin: z.number(),
     value: z.number(),
   }),
 ]);

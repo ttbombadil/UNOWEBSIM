@@ -21,6 +21,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const logger = new Logger("Routes");
   const httpServer = createServer(app);
 
+  // Lightweight health endpoint for backend reachability checks
+  app.get('/api/health', (_req, res) => {
+    res.json({ status: 'ok' });
+  });
+
   // Setup WebSocket server
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
@@ -38,14 +43,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Map to store per-client runner processes
   const clientRunners = new Map<WebSocket, { runner: SandboxRunner | null; isRunning: boolean }>();
-
-  function broadcastMessage(message: WSMessage) {
-    wss.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify(message));
-      }
-    });
-  }
 
   function sendMessageToClient(ws: WebSocket, message: WSMessage) {
     if (ws.readyState === WebSocket.OPEN) {
@@ -258,7 +255,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               logger.info(`[Simulation] Starting with timeout: ${timeoutValue}s`);
 
               // Start genuine C++ execution with isComplete support!
-              clientState.runner.runSketch(
+                clientState.runner.runSketch(
                 lastCompiledCode,
                 (line: string, isComplete?: boolean) => {
                   // First output means compilation succeeded
@@ -269,11 +266,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
                       gccStatus: 'success',
                     });
                   }
-                  sendMessageToClient(ws, {
-                    type: 'serial_output',
-                    data: line,
-                    isComplete: isComplete ?? true
-                  });
+                  // Backwards-compatible: detect wrapped SERIAL_EVENT JSON sent by backend
+                  const serialWrapMatch = typeof line === 'string' && line.startsWith('[[SERIAL_EVENT_JSON:') && line.endsWith(']]');
+                  if (serialWrapMatch) {
+                    try {
+                      const jsonStr = line.slice('[[SERIAL_EVENT_JSON:'.length, -2);
+                      const payload = JSON.parse(jsonStr);
+                      sendMessageToClient(ws, {
+                        type: 'serial_event',
+                        payload
+                      });
+                    } catch (err) {
+                      // Fall back to raw output if parsing fails
+                      sendMessageToClient(ws, {
+                        type: 'serial_output',
+                        data: line,
+                        isComplete: isComplete ?? true
+                      });
+                    }
+                  } else {
+                    sendMessageToClient(ws, {
+                      type: 'serial_output',
+                      data: line,
+                      isComplete: isComplete ?? true
+                    });
+                  }
                 },
                 (err: string) => {
                   logger.warn(`[Client WS][ERR]: ${err}`);
@@ -357,6 +374,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
             }
             break;
 
+          case 'code_changed':
+            {
+              logger.info('Received code_changed message');
+              const clientState = clientRunners.get(ws);
+              if (clientState?.runner && clientState?.isRunning) {
+                logger.info('Stopping simulation due to code change');
+                clientState.runner.stop();
+                clientState.isRunning = false;
+                sendMessageToClient(ws, {
+                  type: 'simulation_status',
+                  status: 'stopped',
+                });
+                sendMessageToClient(ws, {
+                  type: 'serial_output',
+                  data: 'Simulation stopped due to code change\n',
+                });
+                logger.info('Simulation stopped due to code change');
+              } else {
+                logger.info('No running simulation to stop');
+              }
+            }
+            break;
+
           case 'stop_simulation':
             {
               const clientState = clientRunners.get(ws);
@@ -382,6 +422,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 clientState.runner.sendSerialInput(data.data);
               } else {
                 logger.warn('Serial input received but simulation is not running.');
+              }
+            }
+            break;
+
+          case 'set_pin_value':
+            {
+              const clientState = clientRunners.get(ws);
+              if (clientState?.runner && clientState?.isRunning) {
+                clientState.runner.setPinValue(data.pin, data.value);
+              } else {
+                logger.warn('Pin value set received but simulation is not running.');
               }
             }
             break;

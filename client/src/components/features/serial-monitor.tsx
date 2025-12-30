@@ -43,7 +43,10 @@ export function SerialMonitor({
   onSendMessage,
   onClear
 }: SerialMonitorProps) {
+  // mark possibly-unused prop as intentionally read to satisfy TS noUnusedLocals
+  void isConnected;
   const [inputValue, setInputValue] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const outputRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
@@ -178,6 +181,8 @@ export function SerialMonitor({
     if (inputValue.trim()) {
       onSendMessage(inputValue);
       setInputValue('');
+      // keep the input focused after sending
+      try { inputRef.current?.focus(); } catch {}
     }
   };
 
@@ -189,24 +194,28 @@ export function SerialMonitor({
 
   return (
     <div className="h-full flex flex-col" data-testid="serial-monitor">
-      <div className="bg-muted px-4 border-b border-border flex items-center h-10">
-        <div className="flex items-center w-full">
+      <div className="bg-muted px-4 border-b border-border flex items-center h-10 overflow-hidden">
+        <div className="flex items-center w-full min-w-0 overflow-hidden whitespace-nowrap">
           <div className="flex items-center space-x-2 flex-shrink-0">
             <div
               className={`w-2 h-2 rounded-full ${isSimulationRunning ? 'bg-green-500 animate-pulse' : 'bg-muted-foreground'}`}
+              style={{
+                boxShadow: isSimulationRunning ? '0 0 8px rgba(34, 197, 94, 0.8)' : 'none',
+                transition: 'box-shadow 200ms ease-in-out'
+              }}
               data-testid="connection-indicator"
             />
             <i className="fas fa-comments text-accent text-sm"></i>
-            <span className="text-sm font-medium">Serial Monitor</span>
-            <span className="text-xs text-muted-foreground">115200 baud</span>
+            <span className="text-sm font-medium truncate">Serial Monitor</span>
+            <span className="text-xs text-muted-foreground hidden sm:inline">115200 baud</span>
           </div>
-          <div className="flex-1" />
+          <div className="flex-1 min-w-0" />
           <div className="flex items-center space-x-2 flex-shrink-0">
             <Button
               variant="ghost"
               size="sm"
               onClick={toggleAutoScroll}
-              className={autoScrollEnabled ? 'text-green-500' : 'text-muted-foreground'}
+              className={autoScrollEnabled ? 'text-green-500 hover:text-green-500' : 'text-muted-foreground'}
               title={autoScrollEnabled ? 'Auto-Scroll aktiv' : 'Auto-Scroll deaktiviert'}
               data-testid="button-toggle-autoscroll"
             >
@@ -258,6 +267,7 @@ export function SerialMonitor({
           <Input
             type="text"
             placeholder="Send to Arduino..."
+            ref={inputRef}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -266,6 +276,7 @@ export function SerialMonitor({
           />
 
           <Button
+            type="button"
             onClick={handleSend}
             size="sm"
             disabled={!inputValue.trim() || !isSimulationRunning}

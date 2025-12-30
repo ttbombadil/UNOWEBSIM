@@ -410,7 +410,6 @@ MIT License - See LICENSE file for details
 ### Contact Information
 
 - **Project Maintainer**: ttbombadil
-- **Email**: 248030666+ttbombadil@users.noreply.github.com
 
 ### Additional Resources
 

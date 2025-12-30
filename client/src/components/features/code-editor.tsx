@@ -60,6 +60,7 @@ interface CodeEditorProps {
 export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnly = false, editorRef: externalEditorRef }: CodeEditorProps) {
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const ignoreChangesRef = useRef(false);
   // Store callback refs to avoid closure issues with keyboard shortcuts
   const onCompileAndRunRef = useRef(onCompileAndRun);
   const onFormatRef = useRef(onFormat);
@@ -70,12 +71,12 @@ export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnl
     // Configure Monaco for Arduino C++
     monaco.languages.register({ id: 'arduino-cpp' });
 
-    // Set tokens provider for Arduino C++
+    // Set tokens provider for Arduino C++ (use stateful handling for block comments)
     monaco.languages.setMonarchTokensProvider('arduino-cpp', {
       tokenizer: {
         root: [
           [/\/\/.*$/, 'comment'],
-          [/\/\*[\s\S]*?\*\//, 'comment'],
+          [/\/\*/, 'comment.block', '@comment'],
           [/".*?"/, 'string'],
           [/'.*?'/, 'string'],
           [/\b(void|int|float|double|char|bool|byte|String|long|short|unsigned)\b/, 'type'],
@@ -87,6 +88,13 @@ export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnl
           [/[;,.]/, 'delimiter'],
           [/\b[a-zA-Z_][a-zA-Z0-9_]*(?=\s*\()/, 'function'],
         ],
+
+        // comment state for multiline comments
+        comment: [
+          [ /\*\//, 'comment.block', '@pop' ],
+          [ /[^\/*]+/, 'comment.block' ],
+          [ /[\/*]/, 'comment.block' ]
+        ]
       },
     });
 
@@ -96,6 +104,7 @@ export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnl
       inherit: true,
       rules: [
         { token: 'comment', foreground: '6a9955', fontStyle: 'italic' },
+        { token: 'comment.block', foreground: '6a9955', fontStyle: 'italic' },
         { token: 'string', foreground: 'ce9178' },
         { token: 'keyword', foreground: '569cd6' },
         { token: 'type', foreground: '4ec9b0' },
@@ -119,6 +128,15 @@ export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnl
       theme: 'arduino-dark',
       readOnly,
       minimap: { enabled: false },
+      // Hide native Monaco scrollbars — we prefer no visible scrollbars
+      scrollbar: {
+        vertical: 'hidden',
+        horizontal: 'hidden',
+        useShadows: false,
+        verticalScrollbarSize: 0,
+        horizontalScrollbarSize: 0,
+        handleMouseWheel: false,
+      },
       fontSize: 14,
       lineHeight: 20,
       fontFamily: 'JetBrains Mono, Consolas, Monaco, monospace',
@@ -146,8 +164,10 @@ export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnl
 
     // Set up change listener with null check
     const changeDisposable = editor.onDidChangeModelContent(() => {
+      if (ignoreChangesRef.current) return;
       const model = editor.getModel();
       if (model) {
+        console.log('CodeEditor: onDidChangeModelContent, calling onChange');
         onChange(editor.getValue());
       }
     });
@@ -178,16 +198,8 @@ export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnl
         }
       }
 
-      // Check if Ctrl/Cmd + Shift + R (Compile&Run)
-      const isCompileAndRunKey = (isMac ? e.metaKey : e.ctrlKey) && e.shiftKey && e.code === 'KeyR';
-      
-      if (isCompileAndRunKey) {
-        e.preventDefault();
-        // Use ref to get the latest callback (avoids stale closure)
-        if (onCompileAndRunRef.current) {
-          onCompileAndRunRef.current();
-        }
-      }
+      // Note: Cmd+U (Compile&Run) is handled by a global document listener
+      // to work even when the editor is not focused
     });
 
     // NEW: Custom paste handler to handle large pastes
@@ -250,7 +262,9 @@ export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnl
 
   useEffect(() => {
     if (editorRef.current && editorRef.current.getValue() !== value) {
+      ignoreChangesRef.current = true;
       editorRef.current.setValue(value);
+      ignoreChangesRef.current = false;
     }
   }, [value]);
 
@@ -262,6 +276,30 @@ export function CodeEditor({ value, onChange, onCompileAndRun, onFormat, readOnl
   useEffect(() => {
     onFormatRef.current = onFormat;
   }, [onFormat]);
+
+  // Global keyboard shortcut for Cmd+U (Compile & Run) - works even when editor is not focused
+  useEffect(() => {
+    const isMac = navigator.platform.toUpperCase().includes('MAC');
+    
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const isCompileKey = (isMac ? e.metaKey : e.ctrlKey) && e.code === 'KeyU';
+      
+      if (isCompileKey) {
+        e.preventDefault(); // Prevent browser default (View Source in Firefox)
+        e.stopPropagation();
+        if (onCompileAndRunRef.current) {
+          onCompileAndRunRef.current();
+        }
+      }
+    };
+
+    // Add listener with capture phase to intercept before browser handles it
+    document.addEventListener('keydown', handleGlobalKeyDown, { capture: true });
+    
+    return () => {
+      document.removeEventListener('keydown', handleGlobalKeyDown, { capture: true });
+    };
+  }, []);
 
   return (
     <div 

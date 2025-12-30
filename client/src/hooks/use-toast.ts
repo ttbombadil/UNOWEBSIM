@@ -6,7 +6,10 @@ import type {
 } from "@/components/ui/toast"
 
 const TOAST_LIMIT = 1
-const TOAST_REMOVE_DELAY = 1000000
+// Default visible duration for toasts (ms)
+const DEFAULT_TOAST_DURATION = 3000
+// Delay before actually removing toast from state (allow animations) (ms)
+const TOAST_REMOVE_DELAY = 3500
 
 type ToasterToast = ToastProps & {
   id: string
@@ -149,11 +152,30 @@ function toast({ ...props }: Toast) {
     })
   const dismiss = () => dispatch({ type: "DISMISS_TOAST", toastId: id })
 
+  // Allow overriding the default via localStorage (set by SecretDialog)
+  let duration = (props as any).duration ?? DEFAULT_TOAST_DURATION
+  try {
+    if (typeof window !== "undefined") {
+      const stored = window.localStorage.getItem("unoToastDuration")
+      if (stored !== null) {
+          if (stored === "infinite") {
+            duration = Infinity
+        } else {
+          const ms = parseInt(stored, 10)
+          if (!Number.isNaN(ms)) duration = ms
+        }
+      }
+    }
+  } catch {
+    // ignore localStorage errors
+  }
+
   dispatch({
     type: "ADD_TOAST",
     toast: {
       ...props,
       id,
+      duration,
       open: true,
       onOpenChange: (open) => {
         if (!open) dismiss()

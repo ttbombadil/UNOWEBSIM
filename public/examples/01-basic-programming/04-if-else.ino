@@ -7,7 +7,7 @@ void setup() {
 }
 
 void loop() {
-  int hour = 14; // Example hour
+  static int hour = 14; // Example hour
   
   Serial.print("Hour: ");
   Serial.print(hour);
@@ -23,6 +23,6 @@ void loop() {
   else {
     Serial.println("Good evening!");
   }
-  
-  delay(10000);
+  hour = (hour + 1) % 24; // Increment hour for demonstration
+  delay(1000);
 }
