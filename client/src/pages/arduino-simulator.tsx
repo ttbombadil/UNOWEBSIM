@@ -1,6 +1,6 @@
 //arduino-simulator.tsx
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Cpu, Play, Square, Loader2, Terminal, Wrench } from 'lucide-react';
@@ -66,6 +66,18 @@ export default function ArduinoSimulator() {
   const [detectedPinModes, setDetectedPinModes] = useState<Record<number, 'INPUT' | 'OUTPUT' | 'INPUT_PULLUP'>>({});
   // Pins that have a detected pinMode(...) declaration which conflicts with analogRead usage
   const [pendingPinConflicts, setPendingPinConflicts] = useState<number[]>([]);
+
+  // Centralized helper to reset UI pin-related state. Pass { keepDetected: true }
+  // to preserve detected pinMode declarations and pending conflicts when desired.
+  const resetPinUI = useCallback((opts?: { keepDetected?: boolean }) => {
+    setPinStates([]);
+    // Only clear detected/derived data when keepDetected is not requested.
+    if (!opts?.keepDetected) {
+      setAnalogPinsUsed([]);
+      setDetectedPinModes({});
+      setPendingPinConflicts([]);
+    }
+  }, []);
   
   // Simulation timeout setting (in seconds)
   const [simulationTimeout, setSimulationTimeout] = useState<number>(60);
@@ -366,12 +378,16 @@ export default function ArduinoSimulator() {
       setSimulationStatus('stopped');
       // Clear serial event queue to prevent buffered characters from appearing after stop
       setSerialEventQueue([]);
+      // Reset UI pin state on stop but preserve detected pinMode declarations
+      resetPinUI({ keepDetected: true });
     },
   });
 
   // Start simulation mutation
   const startMutation = useMutation({
     mutationFn: async () => {
+      // Reset UI before starting a fresh simulation but preserve detected pinMode info
+      resetPinUI({ keepDetected: true });
       sendMessage({ type: 'start_simulation', timeout: simulationTimeout });
       return { success: true };
     },
@@ -656,7 +672,8 @@ export default function ArduinoSimulator() {
           setSimulationStatus(message.status);
           // Reset pin states and compilation status when simulation stops
           if (message.status === 'stopped') {
-            setPinStates([]);
+            // Preserve detected pinMode declarations when simulation stops
+            resetPinUI({ keepDetected: true });
             setCompilationStatus('ready');
           }
           break;
@@ -733,7 +750,10 @@ export default function ArduinoSimulator() {
     sendMessage({ type: 'code_changed' });
     if (simulationStatus === 'running') {
       setSimulationStatus('stopped');
+      // Reset all UI pin state when code changes while running
+      resetPinUI();
     }
+    // Detected pin modes and pending conflicts are cleared as part of resetPinUI
     
     // Update the active tab content
     if (activeTabId) {
@@ -1071,7 +1091,8 @@ export default function ArduinoSimulator() {
       // Clear previous outputs and stop simulation
       setCliOutput('');
       setSerialOutput([]);
-      setPinStates([]);
+      // Reset UI pin state and detected pin-mode info
+      resetPinUI();
       setCompilationStatus('ready');
       setArduinoCliStatus('idle');
       setGccStatus('idle');
@@ -1110,7 +1131,8 @@ export default function ArduinoSimulator() {
     // Clear previous outputs
     setCliOutput('');
     setSerialOutput([]);
-    setPinStates([]);
+    // Reset UI pin state and detected pin-mode info
+    resetPinUI();
     setCompilationStatus('ready');
     setArduinoCliStatus('idle');
     setGccStatus('idle');
@@ -1199,8 +1221,8 @@ export default function ArduinoSimulator() {
     }
     // Clear serial output on reset
     setSerialOutput([]);
-    // Reset pin states
-    setPinStates([]);
+    // Reset pin states (preserve detected pinMode info)
+    resetPinUI({ keepDetected: true });
     
     toast({
       title: "Resetting...",
