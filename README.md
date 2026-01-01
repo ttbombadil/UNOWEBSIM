@@ -70,8 +70,8 @@ MIT License - See [LICENSE](LICENSE) for details
 - **Questions**: Open a discussion or check existing issues
 
 ### Project Maintainers
-- **Mo Tiltmann** (MoDevIO)
-- **Tom Tiltmann** (ttbombadil)
+- **Mo Tiltmann** (MoDevIO) - Couven-Gymnasium, Aachen
+- **Tom Tiltmann** (ttbombadil) - Technische Hochschule, Köln
 
 
 ### Additional Resources
