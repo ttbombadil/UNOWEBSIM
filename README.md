@@ -1,11 +1,16 @@
 # UnoWebSim
-
 ![Supported OS](https://img.shields.io/badge/Supported%20OS-Linux%20%26%20macOS-blue?logo=refinedgithub)
-[![Test & Coverage](https://github.com/MoDevIO/UNOWEBSIM/actions/workflows/test-coverage.yml/badge.svg?branch=main)](https://modevio.github.io/UNOWEBSIM/)
-![GitHub commit activity](https://img.shields.io/github/commit-activity/w/modevio/unowebsim)
+![GitHub commit activity](https://img.shields.io/github/commit-activity/w/modevio/unowebsim?color=lightgreen)
+<br>
+![Tests](https://img.shields.io/github/actions/workflow/status/MoDevIO/UNOWEBSIM/test-coverage.yml?label=Tests)
+![Test Coverage](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FMoDevIO%2FUNOWEBSIM%2Frefs%2Fheads%2Fgh-pages%2Fcoverage-summary.json&query=%24.functions.percent&suffix=%25&label=Test%20Coverage&color=purple)
+<br>
+![Issues](https://img.shields.io/github/issues-raw/MoDevIO/UNOWEBSIM?color=orange)
+![Pull Requests](https://img.shields.io/github/issues-pr-raw/MoDevIO/UNOWEBSIM?color=cyan)
 
 
 A web-based Arduino simulator that provides an interactive code editor, compilation and Arduino Preview for Arduino sketches directly in the browser.
+
 
 
 ## Preview
