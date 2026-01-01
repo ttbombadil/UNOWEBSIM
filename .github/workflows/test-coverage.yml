@@ -52,6 +52,11 @@ jobs:
           mkdir -p coverage/lcov-report
           cp coverage/coverage-final.json coverage/lcov-report/ || true
 
+      - name: Generate coverage summary JSON
+        if: always()
+        run: |
+          node -e "const fs=require('fs');const path='coverage/coverage-final.json';if(!fs.existsSync(path)){console.error('coverage-final.json not found');process.exit(0);}const cov=JSON.parse(fs.readFileSync(path,'utf8'));let sCovered=0,sTotal=0,fCovered=0,fTotal=0,bCovered=0,bTotal=0;for(const k of Object.keys(cov)){const file=cov[k];const s=file.s||{};sTotal+=Object.keys(s).length;sCovered+=Object.values(s).filter(v=>v>0).length;const f=file.f||{};fTotal+=Object.keys(f).length;fCovered+=Object.values(f).filter(v=>v>0).length;const b=file.b||{};for(const bid of Object.keys(b)){const arr=b[bid]||[];bTotal+=Array.isArray(arr)?arr.length:0;bCovered+=Array.isArray(arr)?arr.filter(v=>v>0).length:0;}}const pct=(cov,total)=>{};const summary={statements:{covered:sCovered,total:sTotal,percent: sTotal? Number((sCovered/sTotal*100).toFixed(2)):0},functions:{covered:fCovered,total:fTotal,percent: fTotal? Number((fCovered/fTotal*100).toFixed(2)):0},branches:{covered:bCovered,total:bTotal,percent: bTotal? Number((bCovered/bTotal*100).toFixed(2)):0},generatedAt:(new Date()).toISOString()};fs.writeFileSync('coverage/lcov-report/coverage-summary.json',JSON.stringify(summary,null,2));console.log('wrote coverage/lcov-report/coverage-summary.json');"
+
       - name: Deploy coverage to GitHub Pages (gh-pages branch)
         if: always()
         uses: peaceiris/actions-gh-pages@v3
