@@ -1,6 +1,7 @@
 //arduino-simulator.tsx
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Cpu, Play, Square, Loader2, Terminal, Wrench } from 'lucide-react';
 import { clsx } from 'clsx';
@@ -20,6 +21,8 @@ import type { Sketch } from '@shared/schema';
 // Logger import
 import { Logger } from '@shared/logger';
 const logger = new Logger("ArduinoSimulator");
+// Intentionally reference to satisfy no-unused-locals during type check
+void logger;
 
 // NEW: Interface for output lines to track completion status
 interface OutputLine {
@@ -56,6 +59,25 @@ export default function ArduinoSimulator() {
   
   // Pin states for Arduino board visualization
   const [pinStates, setPinStates] = useState<PinState[]>([]);
+  // Analog pins detected in the code that need sliders (internal pin numbers 14..19)
+  const [analogPinsUsed, setAnalogPinsUsed] = useState<number[]>([]);
+  // Detected explicit pinMode(...) declarations found during parsing.
+  // We store modes for pins so that we can apply them when the simulation starts.
+  const [detectedPinModes, setDetectedPinModes] = useState<Record<number, 'INPUT' | 'OUTPUT' | 'INPUT_PULLUP'>>({});
+  // Pins that have a detected pinMode(...) declaration which conflicts with analogRead usage
+  const [pendingPinConflicts, setPendingPinConflicts] = useState<number[]>([]);
+
+  // Centralized helper to reset UI pin-related state. Pass { keepDetected: true }
+  // to preserve detected pinMode declarations and pending conflicts when desired.
+  const resetPinUI = useCallback((opts?: { keepDetected?: boolean }) => {
+    setPinStates([]);
+    // Only clear detected/derived data when keepDetected is not requested.
+    if (!opts?.keepDetected) {
+      setAnalogPinsUsed([]);
+      setDetectedPinModes({});
+      setPendingPinConflicts([]);
+    }
+  }, []);
   
   // Simulation timeout setting (in seconds)
   const [simulationTimeout, setSimulationTimeout] = useState<number>(60);
@@ -63,18 +85,249 @@ export default function ArduinoSimulator() {
   // RX/TX LED activity counters (increment on activity for change detection)
   const [txActivity, setTxActivity] = useState(0);
   const [rxActivity, setRxActivity] = useState(0);
+  // Track the last scheduled display timestamp for serial output (epoch ms)
+  const lastSerialDisplayRef = useRef<number>(Date.now());
+  // Track wall-clock time when last serial_event was received
+  const lastSerialEventAtRef = useRef<number>(0);
+  // Queue for incoming serial_events to be processed in order
+  const [serialEventQueue, setSerialEventQueue] = useState<Array<{payload: any, receivedAt: number}>>([]);
+
+  // Mobile UI: detect small screens and provide a floating tab full-screen view
+  const isClient = typeof window !== 'undefined';
+  const mqQuery = '(max-width: 768px)';
+  const initialIsMobile = isClient ? window.matchMedia(mqQuery).matches : false;
+  const [isMobile, setIsMobile] = useState<boolean>(initialIsMobile);
+  // Initialize mobilePanel immediately on mount when on mobile to avoid flicker/delay
+  const [mobilePanel, setMobilePanel] = useState<'code' | 'compile' | 'serial' | 'board' | null>(initialIsMobile ? 'code' : null);
+
+  useEffect(() => {
+    if (!isClient) return;
+    const mq = window.matchMedia(mqQuery);
+    const onChange = (e: MediaQueryListEvent | MediaQueryList) => {
+      const matches = 'matches' in e ? e.matches : mq.matches;
+      setIsMobile(matches);
+      // If switching into mobile mode, open code panel immediately
+      if (matches && !mobilePanel) setMobilePanel('code');
+      // If switching out of mobile, close any mobile panel
+      if (!matches) setMobilePanel(null);
+    };
+    // Modern browsers: addEventListener; fallback to addListener
+    if (typeof mq.addEventListener === 'function') mq.addEventListener('change', onChange as any);
+    else mq.addListener(onChange as any);
+    return () => {
+      if (typeof mq.removeEventListener === 'function') mq.removeEventListener('change', onChange as any);
+      else mq.removeListener(onChange as any);
+    };
+  }, [isClient, mobilePanel]);
+
+  // Prevent body scroll when mobile panel is open
+  useEffect(() => {
+    if (!isClient) return;
+    const prev = document.body.style.overflow;
+    if (mobilePanel) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = prev || '';
+    }
+    return () => { document.body.style.overflow = prev || ''; };
+  }, [mobilePanel, isClient]);
+
+  // Compute header height so mobile overlay can sit below it (preserve normal header)
+  const [headerHeight, setHeaderHeight] = useState<number>(56);
+  const [overlayZ, setOverlayZ] = useState<number>(30);
+  useEffect(() => {
+    if (!isClient) return;
+    const measure = () => {
+      // First try to find our mobile header by data attribute
+      let hdr: Element | null = document.querySelector('[data-mobile-header]');
+      // Fallback to <header> tag
+      if (!hdr) hdr = document.querySelector('header');
+      if (!hdr) {
+        const all = Array.from(document.body.querySelectorAll('*')) as HTMLElement[];
+        hdr = all.find(el => {
+          if (!el) return false;
+          // ignore html/body
+          if (el === document.body || el === document.documentElement) return false;
+          const style = getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+          const r = el.getBoundingClientRect();
+          // must be near the top and reasonably small (not full-page)
+          if (r.top < -5 || r.top > 48) return false;
+          if (r.height < 24 || r.height > window.innerHeight / 2) return false;
+          return true;
+        }) || null;
+      }
+
+      if (hdr === document.body || hdr === document.documentElement) hdr = null;
+
+      let h = 56;
+      if (hdr) {
+        const rect = (hdr as HTMLElement).getBoundingClientRect();
+        if (rect.height > 0 && rect.height < window.innerHeight / 2) h = Math.ceil(rect.height);
+      }
+      setHeaderHeight(h);
+
+      let z = 0;
+      if (hdr) {
+        const zStr = getComputedStyle(hdr as HTMLElement).zIndex;
+        const zNum = parseInt(zStr || '', 10);
+        z = Number.isFinite(zNum) ? zNum : 0;
+      }
+      const chosenZ = z > 0 ? Math.max(z - 1, 5) : 30;
+      setOverlayZ(chosenZ);
+      console.debug('[mobile overlay] header detect:', hdr, 'headerHeight=', h, 'overlayZ=', chosenZ);
+    };
+
+    measure();
+    window.addEventListener('resize', measure);
+    const hdr = document.querySelector('header');
+    if (hdr) {
+      const obs = new MutationObserver(measure);
+      obs.observe(hdr, { attributes: true, childList: true, subtree: true });
+      return () => {
+        window.removeEventListener('resize', measure);
+        obs.disconnect();
+      };
+    }
+  }, [isClient]);
+
+  // Backend availability tracking
+  const [backendReachable, setBackendReachable] = useState(true);
+  const [backendPingError, setBackendPingError] = useState<string | null>(null);
+  
+  // Ref to track if backend was ever unreachable (for recovery toast)
+  const wasBackendUnreachableRef = useRef(false);
+  
+  // Ref to track previous backend reachable state for detecting transitions
+  const prevBackendReachableRef = useRef(true);
 
 
   const { toast } = useToast();
+  // transient screen glitch on compile error
+  const [showErrorGlitch, setShowErrorGlitch] = useState(false);
+  const triggerErrorGlitch = (duration = 600) => {
+    try {
+      setShowErrorGlitch(true);
+      window.setTimeout(() => setShowErrorGlitch(false), duration);
+    } catch {}
+  };
   const queryClient = useQueryClient();
-  const { isConnected, lastMessage, messageQueue, consumeMessages, sendMessage } = useWebSocket();
+  const { isConnected, connectionError, hasEverConnected, lastMessage, messageQueue, consumeMessages, sendMessage } = useWebSocket();
+  // Mark some hook values as intentionally read to avoid TS unused-local errors
+  void isConnected;
+  void lastMessage;
+
+  // Backend / websocket reachability notifications
+  useEffect(() => {
+    if (connectionError) {
+      toast({
+        title: "Backend unreachable",
+        description: connectionError,
+        variant: "destructive",
+      });
+    } else if (!isConnected && hasEverConnected) {
+      toast({
+        title: "Connection lost",
+        description: "Trying to re-establish backend connection...",
+        variant: "destructive",
+      });
+    }
+  }, [connectionError, isConnected, hasEverConnected, toast]);
+
+  // Lightweight backend ping every second
+  useEffect(() => {
+    let cancelled = false;
+
+    const ping = async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 800);
+      try {
+        const res = await fetch('/api/health', { method: 'GET', cache: 'no-store', signal: controller.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!cancelled) {
+          setBackendReachable(true);
+          setBackendPingError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setBackendReachable(false);
+          setBackendPingError((err as Error)?.message || 'Health check failed');
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
+
+    const interval = setInterval(ping, 1000);
+    ping();
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Show toast when HTTP backend becomes unreachable or recovers
+  useEffect(() => {
+    if (!backendReachable) {
+      wasBackendUnreachableRef.current = true;
+      toast({
+        title: "Backend unreachable",
+        description: backendPingError || 'Could not reach API server.',
+        variant: "destructive",
+      });
+    } else if (backendReachable && wasBackendUnreachableRef.current) {
+      // Backend recovered after being unreachable
+      wasBackendUnreachableRef.current = false;
+      toast({
+        title: "Backend reachable again",
+        description: "Connection restored.",
+      });
+    }
+  }, [backendReachable, backendPingError, toast]);
+
+  const ensureBackendConnected = (actionLabel: string) => {
+    if (!backendReachable || !isConnected) {
+      toast({
+        title: "Backend unreachable",
+        description: backendPingError || connectionError || `${actionLabel} failed because the backend is not reachable. Please check the server or retry in a moment.`,
+        variant: "destructive",
+      });
+      return false;
+    }
+    return true;
+  };
+
+  const isBackendUnreachableError = (error: unknown) => {
+    const message = (error as Error | undefined)?.message || '';
+    return message.includes('Failed to fetch')
+      || message.includes('NetworkError')
+      || message.includes('ERR_CONNECTION')
+      || message.includes('Network request failed');
+  };
 
   // Fetch default sketch
   const { data: sketches } = useQuery<Sketch[]>({
     queryKey: ['/api/sketches'],
     retry: 3,
     retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
+    enabled: backendReachable, // Only query if backend is reachable
   });
+
+  // Refetch sketches when backend becomes reachable again (false -> true transition)
+  useEffect(() => {
+    const wasUnreachable = !prevBackendReachableRef.current;
+    const isNowReachable = backendReachable;
+    
+    // Update the ref for next check
+    prevBackendReachableRef.current = backendReachable;
+    
+    if (wasUnreachable && isNowReachable) {
+      // Backend just transitioned from unreachable to reachable
+      console.log('[Backend] Recovered, refetching queries...');
+      queryClient.refetchQueries({ queryKey: ['/api/sketches'] });
+    }
+  }, [backendReachable, queryClient]);
 
   // Compilation mutation
   const compileMutation = useMutation({
@@ -90,6 +343,8 @@ export default function ArduinoSimulator() {
         setCliOutput(data.output || '✓ Arduino-CLI Compilation succeeded.');
       } else {
         setArduinoCliStatus('error');
+        // trigger global red glitch to indicate compile error
+        triggerErrorGlitch();
         // REPLACE output, don't append
         setCliOutput(data.errors || '✗ Arduino-CLI Compilation failed.');
       }
@@ -100,11 +355,14 @@ export default function ArduinoSimulator() {
         variant: data.success ? undefined : "destructive",
       });
     },
-    onError: () => {
+    onError: (error) => {
       setArduinoCliStatus('error');
+      // network/backend or unexpected compile error — show glitch as well
+      triggerErrorGlitch();
+      const backendDown = isBackendUnreachableError(error);
       toast({
-        title: "Compilation with Arduino-CLI Failed",
-        description: "There were errors in your sketch",
+        title: backendDown ? "Backend unreachable" : "Compilation with Arduino-CLI Failed",
+        description: backendDown ? "API server unreachable. Please check the backend or reload." : "There were errors in your sketch",
         variant: "destructive",
       });
     },
@@ -118,13 +376,18 @@ export default function ArduinoSimulator() {
     },
     onSuccess: () => {
       setSimulationStatus('stopped');
+      // Clear serial event queue to prevent buffered characters from appearing after stop
+      setSerialEventQueue([]);
+      // Reset UI pin state on stop but preserve detected pinMode declarations
+      resetPinUI({ keepDetected: true });
     },
   });
 
   // Start simulation mutation
   const startMutation = useMutation({
     mutationFn: async () => {
-      console.log('[Simulation] Starting with timeout:', simulationTimeout);
+      // Reset UI before starting a fresh simulation but preserve detected pinMode info
+      resetPinUI({ keepDetected: true });
       sendMessage({ type: 'start_simulation', timeout: simulationTimeout });
       return { success: true };
     },
@@ -134,6 +397,17 @@ export default function ArduinoSimulator() {
         title: "Simulation Started",
         description: "Arduino simulation is now running",
       });
+      // If there are any pending pin conflicts detected during parsing,
+      // append a warning to the compilation output so the user sees it in
+      // the Compiler panel after starting the simulation.
+      try {
+        if (pendingPinConflicts && pendingPinConflicts.length > 0) {
+          const names = pendingPinConflicts.map(p => (p >= 14 && p <= 19) ? `A${p - 14}` : `${p}`).join(', ');
+          setCliOutput(prev => (prev ? prev + "\n\n" : "") + `⚠️ Pin usage conflict: Pins used as digital via pinMode(...) and also read with analogRead(): ${names}. This may be unintended.`);
+          // Clear pending after showing once
+          setPendingPinConflicts([]);
+        }
+      } catch {}
     },
     onError: (error: any) => {
       toast({
@@ -157,10 +431,7 @@ export default function ArduinoSimulator() {
     if (gccStatus !== 'idle') setGccStatus('idle');
     if (compilationStatus !== 'ready') setCompilationStatus('ready');
 
-    // Stop simulation when code changes
-    if (simulationStatus === 'running') {
-      stopMutation.mutate();
-    }
+    // Note: Simulation stopping on code change is now handled in handleCodeChange
   }, [code]);
 
   useEffect(() => {
@@ -284,11 +555,26 @@ export default function ArduinoSimulator() {
       switch (message.type) {
         case 'serial_output': {
           // NEW: Handle isComplete flag for Serial.print() vs Serial.println()
-          const text = message.data;
+          let text = message.data;
           const isComplete = message.isComplete ?? true; // Default to true for backwards compatibility
 
           // Trigger TX LED blink (Arduino is transmitting data)
           setTxActivity(prev => prev + 1);
+
+          // If we recently received structured `serial_event` messages, ignore legacy `serial_output` to avoid duplicates
+          const now = Date.now();
+          if (lastSerialEventAtRef.current && (now - lastSerialEventAtRef.current) < 1000) {
+            // Short-circuit: drop this legacy serial_output
+            // eslint-disable-next-line no-console
+            console.debug('Dropping legacy serial_output because recent serial_event exists', { text, ageMs: now - lastSerialEventAtRef.current });
+            break;
+          }
+
+          // Remove trailing newlines from text (they are represented by isComplete flag)
+          const isNewlineOnly = text === '\n' || text === '\r\n';
+          if (isNewlineOnly) {
+            text = ''; // Don't add the newline character to the text
+          }
 
           setSerialOutput(prev => {
             const newLines = [...prev];
@@ -296,14 +582,16 @@ export default function ArduinoSimulator() {
             if (isComplete) {
               // Check if last line is incomplete - if so, complete it
               if (newLines.length > 0 && !newLines[newLines.length - 1].complete) {
-                // Complete the existing incomplete line
+                // Complete the existing incomplete line (add text only if non-empty)
                 newLines[newLines.length - 1] = {
                   text: newLines[newLines.length - 1].text + text,
                   complete: true
                 };
               } else {
-                // Complete line without pending incomplete - add as new line
-                newLines.push({ text, complete: true });
+                // Complete line without pending incomplete - add as new line only if text is non-empty
+                if (text.length > 0) {
+                  newLines.push({ text, complete: true });
+                }
               }
             } else {
               // Incomplete line (from Serial.print) - append to last line or create new
@@ -323,6 +611,33 @@ export default function ArduinoSimulator() {
           });
           break;
         }
+          case 'serial_event': {
+            // Only queue serial events if simulation is running
+            if (simulationStatus === 'running') {
+              const payload = (message as any).payload || {};
+              // Record arrival time so we can suppress duplicate legacy serial_output messages
+              const receivedAt = Date.now();
+              lastSerialEventAtRef.current = receivedAt;
+              // Debug: log incoming payloads to console to help diagnose ordering issues
+              // eslint-disable-next-line no-console
+              console.debug('[serial_event recv]', { payload, receivedAt });
+              // Deduplicate: if last queued event has same ts_write and data, skip
+              setSerialEventQueue(prev => {
+                const last = prev.length > 0 ? prev[prev.length - 1] : null;
+                try {
+                  if (last && last.payload && payload && last.payload.ts_write === payload.ts_write && last.payload.data === payload.data) {
+                    // eslint-disable-next-line no-console
+                    console.debug('Dedup serial_event skipped', { ts_write: payload.ts_write });
+                    return prev;
+                  }
+                } catch (e) {
+                  // ignore comparison errors
+                }
+                return [...prev, { payload, receivedAt }];
+              });
+            }
+            break;
+          }
         case 'compilation_status':
           if (message.arduinoCliStatus !== undefined) {
             setArduinoCliStatus(message.arduinoCliStatus);
@@ -341,8 +656,8 @@ export default function ArduinoSimulator() {
           }
           break;
         case 'compilation_error':
-          // Bei GCC-Fehler: Vorherigen Output ERSETZEN, nicht anhängen
-          // Der Arduino-CLI Output war "success", aber GCC ist fehlgeschlagen
+          // For GCC errors: REPLACE previous output, do not append
+          // Arduino-CLI reported success, but GCC failed
           console.log('[WS] GCC Compilation Error detected:', message.data);
           setCliOutput('❌ GCC Compilation Error:\n\n' + message.data);
           setGccStatus('error');
@@ -357,7 +672,8 @@ export default function ArduinoSimulator() {
           setSimulationStatus(message.status);
           // Reset pin states and compilation status when simulation stops
           if (message.status === 'stopped') {
-            setPinStates([]);
+            // Preserve detected pinMode declarations when simulation stops
+            resetPinUI({ keepDetected: true });
             setCompilationStatus('ready');
           }
           break;
@@ -376,15 +692,23 @@ export default function ArduinoSimulator() {
                   1: 'OUTPUT', 
                   2: 'INPUT_PULLUP'
                 };
+                // If a mode update comes from the runtime (pinMode call), consider this an explicit
+                // digital usage — convert an auto-detected 'analog' type to 'digital' so the UI
+                // shows a solid frame instead of dashed.
                 newStates[existingIndex] = {
                   ...newStates[existingIndex],
-                  mode: modeMap[value] || 'INPUT'
+                  mode: modeMap[value] || 'INPUT',
+                  type: newStates[existingIndex].type === 'analog' ? 'digital' : newStates[existingIndex].type
                 };
               } else if (stateType === 'value') {
+                // Update value only. Do NOT change the pin `type` based on incoming
+                // value updates — `pinMode` (runtime or parsed) controls whether a
+                // pin is considered digital. For analog pins that were never
+                // explicitly `pinMode`-ed, new entries (below) will be created
+                // with type 'analog'. Here we preserve existing.type.
                 newStates[existingIndex] = {
                   ...newStates[existingIndex],
-                  value,
-                  type: 'digital'
+                  value
                 };
               } else if (stateType === 'pwm') {
                 newStates[existingIndex] = {
@@ -404,7 +728,9 @@ export default function ArduinoSimulator() {
                 pin,
                 mode: stateType === 'mode' ? (modeMap[value] || 'INPUT') : 'OUTPUT',
                 value: stateType === 'value' || stateType === 'pwm' ? value : 0,
-                type: stateType === 'pwm' ? 'pwm' : 'digital'
+                // New pins on 14..19 are analog by default when a value arrives
+                // and we haven't seen an explicit pinMode yet.
+                type: stateType === 'pwm' ? 'pwm' : (pin >= 14 && pin <= 19 ? 'analog' : 'digital')
               });
             }
             
@@ -420,6 +746,15 @@ export default function ArduinoSimulator() {
     setCode(newCode);
     setIsModified(true);
     
+    // Stop simulation when user edits the code
+    sendMessage({ type: 'code_changed' });
+    if (simulationStatus === 'running') {
+      setSimulationStatus('stopped');
+      // Reset all UI pin state when code changes while running
+      resetPinUI();
+    }
+    // Detected pin modes and pending conflicts are cleared as part of resetPinUI
+    
     // Update the active tab content
     if (activeTabId) {
       setTabs(tabs.map(tab => 
@@ -428,6 +763,267 @@ export default function ArduinoSimulator() {
     }
   };
 
+  // Parse the current code to detect which analog pins are used by name or channel
+  useEffect(() => {
+    let mainCode = code;
+    if (!mainCode && tabs.length > 0) mainCode = tabs[0].content || '';
+
+    const pins = new Set<number>();
+    const varMap = new Map<string, number>();
+
+    // Detect #define VAR A0 or #define VAR 0
+    const defineRe = /#define\s+(\w+)\s+(A\d|\d+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = defineRe.exec(mainCode))) {
+      const name = m[1];
+      const token = m[2];
+      let p: number | undefined;
+      const aMatch = token.match(/^A(\d+)$/i);
+      if (aMatch) {
+        const idx = Number(aMatch[1]);
+        if (idx >= 0 && idx <= 5) p = 14 + idx;
+      } else if (/^\d+$/.test(token)) {
+        const idx = Number(token);
+        if (idx >= 0 && idx <= 5) p = 14 + idx;
+        else if (idx >= 14 && idx <= 19) p = idx;
+      }
+      if (p !== undefined) varMap.set(name, p);
+    }
+
+    // Detect simple variable assignments like: int sensorPin = A0; or const int s = 0;
+    const assignRe = /(?:int|const\s+int|uint8_t|byte)\s+(\w+)\s*=\s*(A\d|\d+)\s*;/g;
+    while ((m = assignRe.exec(mainCode))) {
+      const name = m[1];
+      const token = m[2];
+      let p: number | undefined;
+      const aMatch = token.match(/^A(\d+)$/i);
+      if (aMatch) {
+        const idx = Number(aMatch[1]);
+        if (idx >= 0 && idx <= 5) p = 14 + idx;
+      } else if (/^\d+$/.test(token)) {
+        const idx = Number(token);
+        if (idx >= 0 && idx <= 5) p = 14 + idx;
+        else if (idx >= 14 && idx <= 19) p = idx;
+      }
+      if (p !== undefined) varMap.set(name, p);
+    }
+
+    // Find all analogRead(...) occurrences
+    const areadRe = /analogRead\s*\(\s*([^\)]+)\s*\)/g;
+    while ((m = areadRe.exec(mainCode))) {
+      const token = m[1].trim();
+      // strip possible casts or expressions (very simple handling)
+      const simple = token.match(/^(A\d+|\d+|\w+)$/i);
+      if (!simple) continue;
+      const tok = simple[1];
+      // If token is A<n>
+      const aMatch = tok.match(/^A(\d+)$/i);
+      if (aMatch) {
+        const idx = Number(aMatch[1]);
+        if (idx >= 0 && idx <= 5) pins.add(14 + idx);
+        continue;
+      }
+      // If numeric literal
+      if (/^\d+$/.test(tok)) {
+        const idx = Number(tok);
+        if (idx >= 0 && idx <= 5) pins.add(14 + idx);
+        else if (idx >= 14 && idx <= 19) pins.add(idx);
+        continue;
+      }
+      // Otherwise assume variable name - resolve from varMap
+      if (varMap.has(tok)) {
+        pins.add(varMap.get(tok)!);
+      }
+    }
+
+      // Detect for-loops like: for (byte i=16; i<20; i++) { ... analogRead(i) ... }
+      const forLoopRe = /for\s*\(\s*(?:byte|int|unsigned|uint8_t)?\s*(\w+)\s*=\s*(\d+)\s*;\s*\1\s*(<|<=)\s*(\d+)\s*;[^\)]*\)\s*\{([\s\S]*?)\}/g;
+      let fm: RegExpExecArray | null;
+      while ((fm = forLoopRe.exec(mainCode))) {
+        const varName = fm[1];
+        const start = Number(fm[2]);
+        const cmp = fm[3];
+        const end = Number(fm[4]);
+        const body = fm[5];
+        const useRe = new RegExp('analogRead\\s*\\(\\s*' + varName + '\\s*\\)', 'g');
+        if (useRe.test(body)) {
+          const inclusive = cmp === '<=';
+          const last = inclusive ? end : end - 1;
+          for (let pin = start; pin <= last; pin++) {
+            // If the loop iterates over analog channel numbers (0..5) or internal pins (14..19 or 16..19), handle mapping
+            if (pin >= 0 && pin <= 5) pins.add(14 + pin);
+            else if (pin >= 14 && pin <= 19) pins.add(pin);
+            else if (pin >= 16 && pin <= 19) pins.add(pin);
+          }
+        }
+      }
+
+    const arr = Array.from(pins).sort((a, b) => a - b);
+    setAnalogPinsUsed(arr);
+
+    // Do NOT prepopulate `pinStates` for detected analog pins here —
+    // showing analog-only frames should only happen when the simulation
+    // is actually running. Populate `pinStates` for analog pins when
+    // `simulationStatus` becomes 'running' (see separate effect below).
+
+    // Detect explicit pinMode calls in code so pins become clickable even before runtime updates
+    // Examples: pinMode(A0, INPUT); pinMode(14, INPUT_PULLUP);
+    const pinModeRe = /pinMode\s*\(\s*(A\d+|\d+)\s*,\s*(INPUT_PULLUP|INPUT|OUTPUT)\s*\)/g;
+    const digitalPinsFromPinMode = new Set<number>();
+    while ((m = pinModeRe.exec(mainCode))) {
+      const token = m[1];
+      const modeToken = m[2];
+      let p: number | undefined;
+      const aMatch = token.match(/^A(\d+)$/i);
+      if (aMatch) {
+        const idx = Number(aMatch[1]);
+        if (idx >= 0 && idx <= 5) p = 14 + idx;
+      } else if (/^\d+$/.test(token)) {
+        // Treat numeric literals in pinMode(...) as literal Arduino pin numbers.
+        const idx = Number(token);
+        if (idx >= 0 && idx <= 255) p = idx;
+      }
+      if (p !== undefined) {
+        digitalPinsFromPinMode.add(p);
+        const mode = modeToken === 'INPUT_PULLUP' ? 'INPUT_PULLUP' : (modeToken === 'OUTPUT' ? 'OUTPUT' : 'INPUT');
+
+        // For analog-numbered pins (14..19), do NOT immediately insert into
+        // `pinStates`. We want analog pins (even when used via pinMode(Ax,...))
+        // to become visible only when the simulation starts. Record the detected
+        // mode in `detectedPinModes` so it can be applied on simulation start.
+        if (p >= 14 && p <= 19) {
+          setDetectedPinModes(prev => ({ ...prev, [p]: mode }));
+        } else {
+          // Non-analog pins: make them clickable immediately
+          setPinStates(prev => {
+            const newStates = [...prev];
+            const exists = newStates.find(x => x.pin === p);
+            if (!exists) {
+              newStates.push({ pin: p, mode: mode as any, value: 0, type: 'digital' });
+            } else {
+              exists.mode = mode as any;
+              exists.type = 'digital';
+            }
+            return newStates;
+          });
+        }
+      }
+    }
+
+    // If any pin is both declared via pinMode(...) and used with analogRead(...), warn the user
+    try {
+      const overlap = Array.from(pins).filter(p => digitalPinsFromPinMode.has(p));
+      if (overlap.length > 0) {
+        // Store conflicts and show them when simulation starts
+        setPendingPinConflicts(overlap);
+        console.warn('[arduino-simulator] Pin usage conflict for pins:', overlap.map(p => (p >= 14 && p <= 19) ? `A${p - 14}` : `${p}`).join(', '));
+      } else {
+        setPendingPinConflicts([]);
+      }
+    } catch {}
+  }, [code, tabs, activeTabId]);
+
+  // When the simulation starts, apply recorded pinMode declarations and
+  // populate any detected analog pins so they become clickable and show
+  // their frames only while the simulation is running.
+  useEffect(() => {
+    if (simulationStatus !== 'running') return;
+
+    setPinStates(prev => {
+      const newStates = [...prev];
+
+      // Apply recorded pinMode(...) declarations (including analog-numbered pins)
+      for (const [pinStr, mode] of Object.entries(detectedPinModes)) {
+        const pin = Number(pinStr);
+        if (Number.isNaN(pin)) continue;
+        const exists = newStates.find(p => p.pin === pin);
+        if (!exists) {
+          newStates.push({ pin, mode: mode as any, value: 0, type: (pin >= 14 && pin <= 19) ? 'digital' : 'digital' });
+        } else {
+          exists.mode = mode as any;
+          if (pin >= 14 && pin <= 19) exists.type = 'digital';
+        }
+      }
+
+      // Ensure detected analog pins are present (as analog) if not already
+      for (const pin of analogPinsUsed) {
+        if (pin < 14 || pin > 19) continue;
+        const exists = newStates.find(p => p.pin === pin);
+        if (!exists) {
+          newStates.push({ pin, mode: 'INPUT', value: 0, type: 'analog' });
+        }
+      }
+
+      return newStates;
+    });
+  }, [simulationStatus, analogPinsUsed, detectedPinModes]);
+
+  // Process queued serial events in order
+  useEffect(() => {
+    if (serialEventQueue.length === 0) return;
+
+    // Sort events by original write timestamp when available (fallback to receivedAt)
+    const sortedEvents = [...serialEventQueue].sort((a, b) => {
+      const ta = (a.payload && typeof a.payload.ts_write === 'number') ? a.payload.ts_write : a.receivedAt;
+      const tb = (b.payload && typeof b.payload.ts_write === 'number') ? b.payload.ts_write : b.receivedAt;
+      return ta - tb;
+    });
+
+    // Process events sequentially, building a buffer
+    let buffer = '';
+    let newLines: OutputLine[] = [...serialOutput];
+
+    for (const { payload } of sortedEvents) {
+      // Normalize data: ensure string and strip CR characters
+      const piece: string = (payload.data || '').toString();
+      buffer += piece.replace(/\r/g, '');
+
+      // Process complete lines
+      while (buffer.includes('\n')) {
+        const pos = buffer.indexOf('\n');
+        const toProcess = buffer.substring(0, pos + 1);
+        buffer = buffer.substring(pos + 1);
+
+        const lines = toProcess.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          if (i < lines.length - 1) {
+            // Complete lines
+            if (newLines.length === 0 || newLines[newLines.length - 1].complete) {
+              newLines.push({ text: line, complete: true });
+            } else {
+              newLines[newLines.length - 1].text += line;
+              newLines[newLines.length - 1].complete = true;
+            }
+          } else {
+            // Last part, incomplete
+            if (line) {
+              if (newLines.length === 0 || newLines[newLines.length - 1].complete) {
+                newLines.push({ text: line, complete: false });
+              } else {
+                newLines[newLines.length - 1].text += line;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Process remaining buffer as incomplete line
+    if (buffer) {
+      if (newLines.length === 0 || newLines[newLines.length - 1].complete) {
+        newLines.push({ text: buffer, complete: false });
+      } else {
+        newLines[newLines.length - 1].text += buffer;
+      }
+    }
+
+    setSerialOutput(newLines);
+
+    // Clear queue after processing
+    setSerialEventQueue([]);
+  }, [serialEventQueue]);
+
   // Tab management handlers
   const handleTabClick = (tabId: string) => {
     const tab = tabs.find(t => t.id === tabId);
@@ -435,6 +1031,17 @@ export default function ArduinoSimulator() {
       setActiveTabId(tabId);
       setCode(tab.content);
       setIsModified(false);
+      
+      // Note: Simulation continues running when switching tabs
+      // Clear previous outputs only if needed, but keep simulation running
+      // setCliOutput(''); // Commented out to preserve outputs
+      // setSerialOutput([]); // Commented out to preserve outputs
+      // setPinStates([]); // Commented out to preserve pin states
+      // setCompilationStatus('ready'); // Commented out
+      // setArduinoCliStatus('idle'); // Commented out
+      // setGccStatus('idle'); // Commented out
+      // setSimulationStatus('stopped'); // Commented out
+      // setHasCompiledOnce(false); // Commented out
     }
   };
 
@@ -453,6 +1060,11 @@ export default function ArduinoSimulator() {
 
   const handleFilesLoaded = (files: Array<{ name: string; content: string }>, replaceAll: boolean) => {
     if (replaceAll) {
+      // Stop simulation if running
+      if (simulationStatus === 'running') {
+        sendMessage({ type: 'stop_simulation' });
+      }
+      
       // Replace all tabs with new files
       const inoFiles = files.filter(f => f.name.endsWith('.ino'));
       const hFiles = files.filter(f => f.name.endsWith('.h'));
@@ -475,6 +1087,17 @@ export default function ArduinoSimulator() {
         setCode(inoTab.content);
         setIsModified(false);
       }
+      
+      // Clear previous outputs and stop simulation
+      setCliOutput('');
+      setSerialOutput([]);
+      // Reset UI pin state and detected pin-mode info
+      resetPinUI();
+      setCompilationStatus('ready');
+      setArduinoCliStatus('idle');
+      setGccStatus('idle');
+      setSimulationStatus('stopped');
+      setHasCompiledOnce(false);
     } else {
       // Add only .h files to existing tabs
       const newHeaderFiles = files.map((file) => ({
@@ -488,6 +1111,11 @@ export default function ArduinoSimulator() {
   };
 
   const handleLoadExample = (filename: string, content: string) => {
+    // Stop simulation if running
+    if (simulationStatus === 'running') {
+      sendMessage({ type: 'stop_simulation' });
+    }
+    
     // Create a new sketch from the example, using the filename as the tab name
     const newTab = {
       id: Math.random().toString(36).substr(2, 9),
@@ -503,7 +1131,8 @@ export default function ArduinoSimulator() {
     // Clear previous outputs
     setCliOutput('');
     setSerialOutput([]);
-    setPinStates([]);
+    // Reset UI pin state and detected pin-mode info
+    resetPinUI();
     setCompilationStatus('ready');
     setArduinoCliStatus('idle');
     setGccStatus('idle');
@@ -571,14 +1200,101 @@ export default function ArduinoSimulator() {
   };
 
   const handleStop = () => {
+    if (!ensureBackendConnected('Simulation stoppen')) return;
     stopMutation.mutate();
   };
 
   const handleStart = () => {
+    if (!ensureBackendConnected('Simulation starten')) return;
     startMutation.mutate();
+  };
+  // mark as intentionally present
+  void handleStart;
+
+  // Reset simulation (stop, recompile, and restart - like pressing the physical reset button)
+  const handleReset = () => {
+    if (!ensureBackendConnected('Simulation zurücksetzen')) return;
+    // Stop if running
+    if (simulationStatus === 'running') {
+      sendMessage({ type: 'stop_simulation' });
+      setSimulationStatus('stopped');
+    }
+    // Clear serial output on reset
+    setSerialOutput([]);
+    // Reset pin states (preserve detected pinMode info)
+    resetPinUI({ keepDetected: true });
+    
+    toast({
+      title: "Resetting...",
+      description: "Recompiling and restarting simulation",
+    });
+    
+    // Small delay then recompile and start
+    setTimeout(() => {
+      handleCompileAndStart();
+    }, 100);
+  };
+
+  // Toggle INPUT pin value (called when user clicks on an INPUT pin square)
+  const handlePinToggle = (pin: number, newValue: number) => {
+    if (simulationStatus !== 'running') {
+      toast({
+        title: "Simulation nicht aktiv",
+        description: "Starte die Simulation, um Pin-Werte zu ändern.",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    // Send the new pin value to the server
+    sendMessage({ type: 'set_pin_value', pin, value: newValue });
+    
+    // Update local pin state immediately for responsive UI
+    setPinStates(prev => {
+      const newStates = [...prev];
+      const existingIndex = newStates.findIndex(p => p.pin === pin);
+      if (existingIndex >= 0) {
+        newStates[existingIndex] = {
+          ...newStates[existingIndex],
+          value: newValue,
+        };
+      }
+      return newStates;
+    });
+  };
+
+  // Handle analog slider changes (0..1023)
+  const handleAnalogChange = (pin: number, newValue: number) => {
+    if (simulationStatus !== 'running') {
+      toast({
+        title: "Simulation nicht aktiv",
+        description: "Starte die Simulation, um Pin-Werte zu ändern.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    sendMessage({ type: 'set_pin_value', pin, value: newValue });
+
+    // Update local pin state immediately for responsive UI
+    setPinStates(prev => {
+      const newStates = [...prev];
+      const existingIndex = newStates.findIndex(p => p.pin === pin);
+      if (existingIndex >= 0) {
+        newStates[existingIndex] = {
+          ...newStates[existingIndex],
+          value: newValue,
+          type: 'analog'
+        };
+      } else {
+        newStates.push({ pin, mode: 'INPUT', value: newValue, type: 'analog' });
+      }
+      return newStates;
+    });
   };
 
   const handleCompileAndStart = () => {
+    if (!ensureBackendConnected('Simulation starten')) return;
     // Get the actual main sketch code - prioritize editor, then tabs, then state
     let mainSketchCode: string = '';
     
@@ -644,7 +1360,7 @@ export default function ArduinoSimulator() {
           setCliOutput(data.errors || '✗ Arduino-CLI Compilation failed.');
         }
         
-        // Simulation nur starten, wenn Compilation Erfolgsmeldung (je nach API-Response prüfen)
+        // Only start simulation when compilation succeeded
         if (data?.success) {
           startMutation.mutate();
           setCompilationStatus('success');
@@ -656,7 +1372,7 @@ export default function ArduinoSimulator() {
             setArduinoCliStatus('idle');
           }, 2000);
         } else {
-          // Optional Fehlerhandling, falls API nicht klar success meldet
+          // Optional error handling if API response is unclear
           setCompilationStatus('error');
           toast({
             title: "Compilation Completed with Errors",
@@ -688,6 +1404,7 @@ export default function ArduinoSimulator() {
   };
 
   const handleSerialSend = (message: string) => {
+    if (!ensureBackendConnected('Serial senden')) return;
     // Trigger RX LED blink (Arduino is receiving data)
     setRxActivity(prev => prev + 1);
     
@@ -756,155 +1473,245 @@ export default function ArduinoSimulator() {
   }
 
   const statusInfo = getStatusInfo();
-  const simulateDisabled = simulationStatus === 'running' || compileMutation.isPending || startMutation.isPending;
+  void getStatusClass;
+  void statusInfo;
+  const simulateDisabled = (simulationStatus !== 'running' && (!backendReachable || !isConnected))
+    || compileMutation.isPending
+    || startMutation.isPending
+    || stopMutation.isPending;
   const stopDisabled = simulationStatus !== 'running' || stopMutation.isPending;
   const buttonsClassName = "hover:bg-green-600 hover:text-white transition-colors";
+  void stopDisabled;
+  void buttonsClassName;
 
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground">
+    <div className={`h-screen flex flex-col bg-background text-foreground relative ${showErrorGlitch ? 'overflow-hidden' : ''}`}>
+      {/* Glitch overlay when compilation fails */}
+      {showErrorGlitch && (
+        <div className="pointer-events-none absolute inset-0 z-50">
+          {/* Single red border flash */}
+          <div className="absolute inset-0 flex items-stretch justify-stretch">
+            <div className="absolute inset-0">
+              <div className="absolute inset-0 border-0 pointer-events-none">
+                <div className="absolute inset-0 rounded-none border-4 border-red-500 opacity-0 animate-border-flash" />
+              </div>
+            </div>
+          </div>
+          <style>{`
+            @keyframes border-flash {
+              0% { opacity: 0; transform: scale(1); }
+              10% { opacity: 1; }
+              60% { opacity: 0.7; }
+              100% { opacity: 0; }
+            }
+            .animate-border-flash { animation: border-flash 0.6s ease-out both; }
+          `}</style>
+        </div>
+      )}
+      {/* Blue breathing border when backend is unreachable */}
+      {!backendReachable && (
+        <div className="pointer-events-none absolute inset-0 z-40">
+          <div className="absolute inset-0">
+            <div className="absolute inset-0 border-0 pointer-events-none">
+              <div className="absolute inset-0 rounded-none border-2 border-blue-400 opacity-80 animate-breathe-blue" />
+            </div>
+          </div>
+          <style>{`
+            @keyframes breathe-blue {
+              0% { box-shadow: 0 0 0 0 rgba(37,99,235,0.06); opacity: 0.6; }
+              25% { box-shadow: 0 0 18px 6px rgba(37,99,235,0.10); opacity: 0.85; }
+              50% { box-shadow: 0 0 36px 12px rgba(37,99,235,0.16); opacity: 1; }
+              75% { box-shadow: 0 0 18px 6px rgba(37,99,235,0.10); opacity: 0.85; }
+              100% { box-shadow: 0 0 0 0 rgba(37,99,235,0.06); opacity: 0.6; }
+            }
+            .animate-breathe-blue { animation: breathe-blue 6s ease-in-out infinite; }
+          `}</style>
+        </div>
+      )}
       {/* Header/Toolbar */}
-      <div className="bg-card border-b border-border px-4 py-3 flex items-center justify-between">
-        <div className="flex items-center space-x-4">
-          <div className="flex items-center space-x-2">
-            <Cpu className="text-accent h-5 w-5" />
-            <h1 className="text-lg font-semibold">Arduino UNO Simulator</h1>
-          </div>
-          <div className="flex items-center space-x-2 text-sm text-muted-foreground">
-            <span className="bg-muted px-2 py-1 rounded text-xs">Board: Arduino UNO</span>
-            <span className="bg-muted px-2 py-1 rounded text-xs">Baud: 115200</span>
-            <div className="bg-muted px-2 py-1 rounded text-xs flex items-center cursor-pointer hover:bg-muted/80 transition-colors relative">
-              <span className="pointer-events-none">Timeout:</span>
-              <select
-                value={simulationTimeout}
-                onChange={(e) => {
-                  const newTimeout = Number(e.target.value);
-                  console.log('[Timeout] Changed to:', newTimeout);
-                  setSimulationTimeout(newTimeout);
+      {!isMobile ? (
+        <div className="bg-card border-b border-border px-4 py-3 flex items-center justify-between flex-nowrap overflow-x-hidden whitespace-nowrap w-screen">
+        <div className="flex items-center space-x-4 min-w-0 whitespace-nowrap">
+          <div className="flex items-center space-x-2 min-w-0 whitespace-nowrap">
+              <Cpu 
+                className="h-5 w-5" 
+                style={{
+                  color: simulationStatus === 'running' ? '#22c55e' : '#6b7280',
+                  filter: simulationStatus === 'running' ? 'drop-shadow(0 0 6px #22c55e)' : 'none',
+                  transition: 'color 200ms ease-in-out, filter 200ms ease-in-out'
                 }}
-                className="absolute inset-0 opacity-0 cursor-pointer w-full"
-              >
-                <option value={5}>5s</option>
-                <option value={10}>10s</option>
-                <option value={30}>30s</option>
-                <option value={60}>60s</option>
-                <option value={120}>2min</option>
-                <option value={300}>5min</option>
-                <option value={600}>10min</option>
-                <option value={0}>∞</option>
-              </select>
-              <span className="ml-1 pointer-events-none">
-                {simulationTimeout === 0 ? '∞' : 
-                 simulationTimeout >= 60 ? `${simulationTimeout / 60}min` : `${simulationTimeout}s`}
-              </span>
-              <svg className="w-3 h-3 ml-1 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
+              />
+              <h1 className="text-lg font-semibold truncate">Arduino UNO Simulator</h1>
             </div>
-          </div>
-        </div>
-
-        <div className="flex items-center space-x-3">
-          <div className="flex items-center space-x-2 text-sm">
-            <div 
-              className="w-6 h-6 rounded-full"
-              style={{
-                backgroundColor: compilationStatus === 'compiling' ? '#eab308' :
-                  compilationStatus === 'success' ? '#22c55e' :
-                  compilationStatus === 'error' ? '#ef4444' :
-                  compilationStatus === 'ready' ? '#6b7280' : '#3b82f6',
-                boxShadow: compilationStatus === 'success' ? '0 0 12px 3px rgba(34,197,94,0.6)' : 
-                  compilationStatus === 'error' ? '0 0 12px 3px rgba(239,68,68,0.6)' : 'none',
-                transition: 'background-color 500ms ease-in-out, box-shadow 500ms ease-in-out',
-                animation: (compilationStatus === 'compiling' || compilationStatus === 'success') 
-                  ? 'gentle-pulse 3s ease-in-out infinite' 
-                  : compilationStatus === 'error' 
-                  ? 'error-blink 0.3s ease-in-out 5' 
-                  : 'none'
-              }}
-            />
-            <style>{`
-              @keyframes gentle-pulse {
-                0%, 100% { opacity: 1; }
-                50% { opacity: 0.7; }
-              }
-              @keyframes error-blink {
-                0%, 100% { opacity: 1; }
-                50% { opacity: 0.6; }
-              }
-            `}</style>
-
-          </div>
-
-          <div className="flex flex-col space-y-1 text-xs w-32 max-w-full ml-8">
-            <div 
-              className="flex items-center px-1.5 py-1 rounded border border-border bg-muted transition-colors duration-300 w-full min-w-0"
-              style={{
-                backgroundColor: arduinoCliStatus === 'compiling' ? 'rgba(234, 179, 8, 0.10)' :
-                  arduinoCliStatus === 'success' ? 'rgba(34, 197, 94, 0.10)' :
-                  arduinoCliStatus === 'error' ? 'rgba(239, 68, 68, 0.10)' :
-                  'rgba(107, 114, 128, 0.10)'
-              }}
-            >
-              <Terminal className="h-3 w-3 mr-1 flex-shrink-0" />
-              <span className="whitespace-nowrap overflow-hidden text-ellipsis max-w-full">{`CLI: ${compilationStatusLabel(arduinoCliStatus)}`}</span>
-            </div>
-            <div 
-              className="flex items-center px-1.5 py-1 rounded border border-border bg-muted transition-colors duration-300 w-full min-w-0"
-              style={{
-                backgroundColor: gccStatus === 'compiling' ? 'rgba(234, 179, 8, 0.10)' :
-                  gccStatus === 'success' ? 'rgba(34, 197, 94, 0.10)' :
-                  gccStatus === 'error' ? 'rgba(239, 68, 68, 0.10)' :
-                  'rgba(107, 114, 128, 0.10)'
-              }}
-            >
-              <Wrench className="h-3 w-3 mr-1 flex-shrink-0" />
-              <span className="whitespace-nowrap overflow-hidden text-ellipsis max-w-full">{`GCC: ${compilationStatusLabel(gccStatus)}`}</span>
+            <div className="flex items-center space-x-2 text-sm text-muted-foreground">
+              <span className="bg-muted px-2 py-1 rounded text-xs">Board: Arduino UNO</span>
+              <span className="bg-muted px-2 py-1 rounded text-xs">Baud: 115200</span>
+              <div className="bg-muted px-2 py-1 rounded text-xs flex items-center cursor-pointer hover:bg-muted/80 transition-colors relative">
+                <span className="pointer-events-none">Timeout:</span>
+                <select
+                  value={simulationTimeout}
+                  onChange={(e) => {
+                    const newTimeout = Number(e.target.value);
+                    console.log('[Timeout] Changed to:', newTimeout);
+                    setSimulationTimeout(newTimeout);
+                  }}
+                  className="absolute inset-0 opacity-0 cursor-pointer w-full"
+                >
+                  <option value={5}>5s</option>
+                  <option value={10}>10s</option>
+                  <option value={30}>30s</option>
+                  <option value={60}>60s</option>
+                  <option value={120}>2min</option>
+                  <option value={300}>5min</option>
+                  <option value={600}>10min</option>
+                  <option value={0}>∞</option>
+                </select>
+                <span className="ml-1 pointer-events-none">
+                  {simulationTimeout === 0 ? '∞' : 
+                   simulationTimeout >= 60 ? `${simulationTimeout / 60}min` : `${simulationTimeout}s`}
+                </span>
+                <svg className="w-3 h-3 ml-1 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
             </div>
           </div>
 
-          <div className="flex items-center space-x-3">
-            <Button
-              onClick={simulationStatus === 'running' ? handleStop : handleCompileAndStart}
-              disabled={compileMutation.isPending || startMutation.isPending || stopMutation.isPending}
-              className={clsx(
-                'w-64',
-                '!text-white',
-                'transition-colors',
-                {
-                  // Klassen für den Zustand 'running' (rot für Stop)
-                  '!bg-orange-600 hover:!bg-orange-700': simulationStatus === 'running' && !(compileMutation.isPending || startMutation.isPending || stopMutation.isPending),
-
-                  // Klassen für den Zustand 'stopped' (grün für Start)
-                  '!bg-green-600 hover:!bg-green-700': simulationStatus !== 'running' && !(compileMutation.isPending || startMutation.isPending || stopMutation.isPending),
-
-                  // Klassen für den 'disabled' Zustand (unabhängig von simulationStatus)
-                  'opacity-50 cursor-not-allowed': compileMutation.isPending || startMutation.isPending || stopMutation.isPending,
+          <div className="flex items-center space-x-3 min-w-0">
+            <div className="flex items-center space-x-2 text-sm">
+              <div 
+                className="w-6 h-6 rounded-full"
+                style={{
+                  backgroundColor: compilationStatus === 'compiling' ? '#eab308' :
+                    compilationStatus === 'success' ? '#22c55e' :
+                    compilationStatus === 'error' ? '#ef4444' :
+                    compilationStatus === 'ready' ? '#6b7280' : '#3b82f6',
+                  boxShadow: compilationStatus === 'success' ? '0 0 12px 3px rgba(34,197,94,0.6)' : 
+                    compilationStatus === 'error' ? '0 0 12px 3px rgba(239,68,68,0.6)' : 'none',
+                  transition: 'background-color 500ms ease-in-out, box-shadow 500ms ease-in-out',
+                  animation: (compilationStatus === 'compiling' || compilationStatus === 'success') 
+                    ? 'gentle-pulse 3s ease-in-out infinite' 
+                    : compilationStatus === 'error' 
+                    ? 'error-blink 0.3s ease-in-out 5' 
+                    : 'none'
+                }}
+              />
+              <style>{`
+                @keyframes gentle-pulse {
+                  0%, 100% { opacity: 1; }
+                  50% { opacity: 0.7; }
                 }
-              )}
-              data-testid="button-simulate-toggle"
-            >
-              {(compileMutation.isPending || startMutation.isPending || stopMutation.isPending) ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : simulationStatus === 'running' ? (
-                <>
-                  <Square className="h-4 w-4 mr-2" />
-                  Stop Simulation
-                </>
-              ) : (
-                <>
-                  <Play className="h-4 w-4 mr-2" />
-                  Start Simulation
-                </>
-              )}
-            </Button>
+                @keyframes error-blink {
+                  0%, 100% { opacity: 1; }
+                  50% { opacity: 0.6; }
+                }
+              `}</style>
 
+            </div>
+
+            <div className="flex flex-col space-y-1 text-xs w-32 max-w-full ml-8">
+              <div 
+                className="flex items-center px-1.5 py-1 rounded border border-border bg-muted transition-colors duration-300 w-full min-w-0"
+                style={{
+                  backgroundColor: arduinoCliStatus === 'compiling' ? 'rgba(234, 179, 8, 0.10)' :
+                    arduinoCliStatus === 'success' ? 'rgba(34, 197, 94, 0.10)' :
+                    arduinoCliStatus === 'error' ? 'rgba(239, 68, 68, 0.10)' :
+                    'rgba(107, 114, 128, 0.10)'
+                }}
+              >
+                <Terminal className="h-3 w-3 mr-1 flex-shrink-0" />
+                <span className="whitespace-nowrap overflow-hidden text-ellipsis max-w-full">{`CLI: ${compilationStatusLabel(arduinoCliStatus)}`}</span>
+              </div>
+              <div 
+                className="flex items-center px-1.5 py-1 rounded border border-border bg-muted transition-colors duration-300 w-full min-w-0"
+                style={{
+                  backgroundColor: gccStatus === 'compiling' ? 'rgba(234, 179, 8, 0.10)' :
+                    gccStatus === 'success' ? 'rgba(34, 197, 94, 0.10)' :
+                    gccStatus === 'error' ? 'rgba(239, 68, 68, 0.10)' :
+                    'rgba(107, 114, 128, 0.10)'
+                }}
+              >
+                <Wrench className="h-3 w-3 mr-1 flex-shrink-0" />
+                <span className="whitespace-nowrap overflow-hidden text-ellipsis max-w-full">{`GCC: ${compilationStatusLabel(gccStatus)}`}</span>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-3">
+              <Button
+                onClick={simulationStatus === 'running' ? handleStop : handleCompileAndStart}
+                disabled={simulateDisabled}
+                className={clsx(
+                  'md:w-64 w-auto',
+                  '!text-white',
+                  'transition-colors',
+                  {
+                    // Classes for the 'running' state (orange for Stop)
+                    '!bg-orange-600 hover:!bg-orange-700': simulationStatus === 'running' && !simulateDisabled,
+
+                    // Classes for the 'stopped' state (green for Start)
+                    '!bg-green-600 hover:!bg-green-700': simulationStatus !== 'running' && !simulateDisabled,
+
+                    // Classes for the disabled state (regardless of simulationStatus)
+                    'opacity-50 cursor-not-allowed bg-gray-500 hover:!bg-gray-500': simulateDisabled,
+                  }
+                )}
+                data-testid="button-simulate-toggle"
+              >
+                {(compileMutation.isPending || startMutation.isPending || stopMutation.isPending) ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : simulationStatus === 'running' ? (
+                  <>
+                    <Square className="h-4 w-4 mr-2" />
+                    Stop Simulation
+                  </>
+                ) : (
+                  <>
+                    <Play className="h-4 w-4 mr-2" />
+                    Start Simulation
+                  </>
+                )}
+              </Button>
+
+            </div>
           </div>
         </div>
-      </div>
-
+      ) : (
+        <div data-mobile-header className="bg-card border-b border-border px-4 py-3 flex items-center justify-center flex-nowrap overflow-hidden w-full relative z-10">
+          <Button
+            onClick={simulationStatus === 'running' ? handleStop : handleCompileAndStart}
+            disabled={simulateDisabled}
+            className={clsx(
+              'w-64',
+              '!text-white',
+              'transition-colors',
+              {
+                '!bg-orange-600 hover:!bg-orange-700': simulationStatus === 'running' && !simulateDisabled,
+                '!bg-green-600 hover:!bg-green-700': simulationStatus !== 'running' && !simulateDisabled,
+                'opacity-50 cursor-not-allowed bg-gray-500 hover:!bg-gray-500': simulateDisabled,
+              }
+            )}
+            data-testid="button-simulate-toggle-mobile"
+          >
+            {(compileMutation.isPending || startMutation.isPending || stopMutation.isPending) ? (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            ) : simulationStatus === 'running' ? (
+              <>
+                <Square className="h-4 w-4 mr-2" />
+                Stop Simulation
+              </>
+            ) : (
+              <>
+                <Play className="h-4 w-4 mr-2" />
+                Start Simulation
+              </>
+            )}
+          </Button>
+        </div>
+      )}
       {/* Main Content Area */}
-      <div className="flex-1 overflow-hidden">
-        <ResizablePanelGroup direction="horizontal" className="h-full" id="main-layout">
+      <div className="flex-1 overflow-hidden relative z-0">
+        {!isMobile ? (
+          <ResizablePanelGroup direction="horizontal" className="h-full" id="main-layout">
           {/* Code Editor Panel */}
           <ResizablePanel defaultSize={50} minSize={20} id="code-panel">
             <div className="h-full flex flex-col">
@@ -919,7 +1726,7 @@ export default function ArduinoSimulator() {
                 onTabAdd={handleTabAdd}
                 onFilesLoaded={handleFilesLoaded}
                 onFormatCode={formatCode}
-                examplesMenu={<ExamplesMenu onLoadExample={handleLoadExample} />}
+                examplesMenu={<ExamplesMenu onLoadExample={handleLoadExample} backendReachable={backendReachable} />}
               />
 
               <div className="flex-1 min-h-0">
@@ -939,7 +1746,7 @@ export default function ArduinoSimulator() {
           {/* Right Panel - Output & Serial Monitor */}
           <ResizablePanel defaultSize={50} minSize={20} id="output-panel">
             <ResizablePanelGroup direction="vertical" id="output-layout">
-              <ResizablePanel defaultSize={33} minSize={15} id="compilation-panel">
+              <ResizablePanel defaultSize={25} minSize={15} id="compilation-panel">
                 <CompilationOutput
                   output={cliOutput}
                   onClear={handleClearCompilationOutput}
@@ -948,7 +1755,7 @@ export default function ArduinoSimulator() {
 
               <ResizableHandle withHandle data-testid="vertical-resizer" />
 
-              <ResizablePanel defaultSize={33} minSize={15} id="serial-panel">
+              <ResizablePanel defaultSize={25} minSize={15} id="serial-panel">
                 <SerialMonitor
                   output={serialOutput}
                   isConnected={isConnected}
@@ -960,17 +1767,124 @@ export default function ArduinoSimulator() {
 
               <ResizableHandle withHandle data-testid="vertical-resizer-board" />
 
-              <ResizablePanel defaultSize={34} minSize={15} id="board-panel">
+              <ResizablePanel defaultSize={50} minSize={15} id="board-panel">
                 <ArduinoBoard
                   pinStates={pinStates}
                   isSimulationRunning={simulationStatus === 'running'}
                   txActive={txActivity}
                   rxActive={rxActivity}
+                  onReset={handleReset}
+                  onPinToggle={handlePinToggle}
+                  analogPins={analogPinsUsed}
+                  onAnalogChange={handleAnalogChange}
                 />
               </ResizablePanel>
             </ResizablePanelGroup>
           </ResizablePanel>
-        </ResizablePanelGroup>
+          </ResizablePanelGroup>
+        ) : (
+          <div className="h-full relative">
+            {/* Render tab bar in a portal so it's fixed to the viewport regardless of ancestor transforms */}
+            {isClient && createPortal(
+              <div className="fixed inset-0 pointer-events-none" style={{ zIndex: overlayZ }}>
+                <div className="absolute inset-0 flex items-end justify-end p-8" style={{ paddingBottom: 'env(safe-area-inset-bottom, 32px)', paddingRight: 'env(safe-area-inset-right, 32px)' }}>
+                    <div className="pointer-events-auto sticky mr-4 mb-4" style={{ alignSelf: 'flex-end' }}>
+                      <div className="bg-black/95 rounded-full shadow-lg p-1 flex flex-col items-center space-y-2">
+                  <button
+                    aria-label="Code Editor"
+                    onClick={() => setMobilePanel(mobilePanel === 'code' ? null : 'code')}
+                    className={clsx('w-10 h-10 flex items-center justify-center rounded-full transition', mobilePanel === 'code' ? 'bg-blue-600 text-white' : 'bg-transparent text-muted-foreground')}
+                  >
+                    <Cpu className="w-5 h-5" />
+                  </button>
+                  <button
+                    aria-label="Compilation Output"
+                    onClick={() => setMobilePanel(mobilePanel === 'compile' ? null : 'compile')}
+                    className={clsx('w-10 h-10 flex items-center justify-center rounded-full transition', mobilePanel === 'compile' ? 'bg-green-600 text-white' : 'bg-transparent text-muted-foreground')}
+                  >
+                    <Wrench className="w-5 h-5" />
+                  </button>
+                  <button
+                    aria-label="Serial Monitor"
+                    onClick={() => setMobilePanel(mobilePanel === 'serial' ? null : 'serial')}
+                    className={clsx('w-10 h-10 flex items-center justify-center rounded-full transition', mobilePanel === 'serial' ? 'bg-amber-600 text-white' : 'bg-transparent text-muted-foreground')}
+                  >
+                    <Terminal className="w-5 h-5" />
+                  </button>
+                  <button
+                    aria-label="Arduino Board"
+                    onClick={() => setMobilePanel(mobilePanel === 'board' ? null : 'board')}
+                    className={clsx('w-10 h-10 flex items-center justify-center rounded-full transition', mobilePanel === 'board' ? 'bg-sky-600 text-white' : 'bg-transparent text-muted-foreground')}
+                  >
+                    <Square className="w-5 h-5" />
+                  </button>
+                    </div>
+                  </div>
+                </div>
+              </div>, document.body)
+
+            }
+
+            {mobilePanel && (
+              <div className="fixed left-0 right-0 bottom-0 bg-card p-0 flex flex-col w-screen" style={{ top: `${headerHeight}px`, height: `calc(100vh - ${headerHeight}px)`, zIndex: overlayZ }}>
+                <div className="flex-1 overflow-auto w-screen h-full">
+                  {mobilePanel === 'code' && (
+                    <div className="h-full flex flex-col w-full">
+                      <SketchTabs
+                        tabs={tabs}
+                        activeTabId={activeTabId}
+                        modifiedTabId={null}
+                        onTabClick={handleTabClick}
+                        onTabClose={handleTabClose}
+                        onTabRename={handleTabRename}
+                        onTabAdd={handleTabAdd}
+                        onFilesLoaded={handleFilesLoaded}
+                        onFormatCode={formatCode}
+                        examplesMenu={<ExamplesMenu onLoadExample={handleLoadExample} backendReachable={backendReachable} />}
+                      />
+                      <div className="flex-1 min-h-0 w-full">
+                        <CodeEditor value={code} onChange={handleCodeChange} onCompileAndRun={handleCompileAndStart} onFormat={formatCode} editorRef={editorRef} />
+                      </div>
+                    </div>
+                  )}
+                  {mobilePanel === 'compile' && (
+                    <div className="h-full w-full">
+                      <CompilationOutput
+                        output={cliOutput}
+                        onClear={handleClearCompilationOutput}
+                      />
+                    </div>
+                  )}
+                  {mobilePanel === 'serial' && (
+                    <div className="h-full w-full">
+                      <SerialMonitor
+                        output={serialOutput}
+                        isConnected={isConnected}
+                        isSimulationRunning={simulationStatus === 'running'}
+                        onSendMessage={handleSerialSend}
+                        onClear={handleClearSerialOutput}
+                      />
+                    </div>
+                  )}
+                  {mobilePanel === 'board' && (
+                    <div className="h-full w-full">
+                      <ArduinoBoard
+                        pinStates={pinStates}
+                        isSimulationRunning={simulationStatus === 'running'}
+                        txActive={txActivity}
+                        rxActive={rxActivity}
+                        onReset={handleReset}
+                        onPinToggle={handlePinToggle}
+                        analogPins={analogPinsUsed}
+                        onAnalogChange={handleAnalogChange}
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

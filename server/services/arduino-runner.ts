@@ -1,12 +1,24 @@
 //arduino-runner.ts
 
 import { spawn } from "child_process";
-import { writeFile, mkdir, rm } from "fs/promises";
+import { writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { Logger } from "@shared/logger";
-import { ARDUINO_MOCK_CODE, ARDUINO_MOCK_LINES } from '../mocks/arduino-mock';
+import { ARDUINO_MOCK_CODE } from '../mocks/arduino-mock';
 
+
+// Simulation config
+const MAX_SIMULATED_BAUD = 10000;
+const MIN_SEND_INTERVAL_MS = 16; // ~60 updates/sec
+
+export function getCharDelayMs(baudrate: number): number {
+    if (baudrate <= 300) return 33;
+    if (baudrate <= 1200) return 8;
+    if (baudrate <= 2400) return 4;
+    if (baudrate <= 4800) return 2;
+    return 1;
+}
 
 export class ArduinoRunner {
     isRunning = false;
@@ -14,10 +26,12 @@ export class ArduinoRunner {
     process: ReturnType<typeof spawn> | null = null;
     processKilled = false;
     private logger = new Logger("ArduinoRunner");
-    private outputBuffer = ""; // Buffer für incomplete lines
+    private outputChunks: string[] = []; // raw stdout chunks queued
+    private outputChunksBytes = 0;
+    private outputBuffer = "";
     private errorBuffer = "";  // Buffer für error output
-    private flushTimer: NodeJS.Timeout | null = null; // Timer für auto-flush
-    private pendingIncomplete = false; // Track if we sent incomplete output
+    private baudrate = 9600; // Default baudrate
+    private isSendingOutput = false; // Flag to prevent overlapping sends
 
     constructor() {
         mkdir(this.tempDir, { recursive: true })
@@ -30,7 +44,8 @@ export class ArduinoRunner {
         onError: (line: string) => void,
         onExit: (code: number | null) => void,
         onCompileError?: (error: string) => void,
-        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void
+        onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void,
+        timeoutMs: number = 180000
     ) {
 
 
@@ -38,8 +53,13 @@ export class ArduinoRunner {
         // Reset buffers for new sketch
         this.outputBuffer = "";
         this.errorBuffer = "";
-        this.pendingIncomplete = false;
+        this.isSendingOutput = false;
         let compilationFailed = false;
+
+        // Parse baudrate from code
+        const baudMatch = code.match(/Serial\s*\.\s*begin\s*\(\s*(\d+)\s*\)/);
+        this.baudrate = baudMatch ? parseInt(baudMatch[1]) : 9600;
+        this.logger.info(`Parsed baudrate: ${this.baudrate}`);
 
         const sketchId = randomUUID();
         const sketchDir = join(this.tempDir, sketchId);
@@ -129,62 +149,29 @@ int main() {
             const timeout = setTimeout(() => {
                 if (this.process) {
                     this.process.kill('SIGKILL');
-                    onOutput("--- Simulation timeout (180s) ---", true);
-                    this.logger.info("Sketch timeout after 180s");
+                    onOutput(`--- Simulation timeout (${timeoutMs / 1000}s) ---`, true);
+                    this.logger.info(`Sketch timeout after ${timeoutMs / 1000}s`);
                 }
-            }, 180000);
+            }, timeoutMs);
 
-            // IMPROVED: Output buffering with auto-flush
+            // IMPROVED: queue raw stdout chunks and send as blocks
             this.process.stdout?.on("data", (data) => {
-
                 const str = data.toString();
+                if (str.length === 0) return;
+                this.outputChunks.push(str);
+                this.outputChunksBytes += str.length;
 
-                // Add to buffer
-                this.outputBuffer += str;
-
-                // Split by newlines and process complete lines
-                const lines = this.outputBuffer.split(/\r?\n/);
-
-                // Keep the last (potentially incomplete) line in buffer
-                this.outputBuffer = lines.pop() || "";
-
-                // Send all complete lines
-                lines.forEach(line => {
-                    if (line.length > 0) {
-                        // If we have pending incomplete output, this completes it
-                        if (this.pendingIncomplete) {
-                            onOutput(line, true); // Complete the previous incomplete line
-                            this.pendingIncomplete = false;
-                        } else {
-                            onOutput(line, true); // New complete line
-                        }
-                    }
-                });
-
-                // NEW: Auto-flush incomplete output after short delay (for Serial.print)
-                // Auto-Flushing des unvollständigen Buffers nach kurzer Wartezeit
-                if (this.outputBuffer.length > 0) {
-                    this.scheduleFlush(onOutput);
-                } else if (this.flushTimer) {
-                    // Wenn Buffer leer ist, evtl. bestehenden Timer löschen
-                    clearTimeout(this.flushTimer);
-                    this.flushTimer = null;
-                }
+                if (!this.isSendingOutput) this.sendNextChunk(onOutput);
             });
 
             this.process.stderr?.on("data", (data) => {
                 const str = data.toString();
-
-                // Add to error buffer
                 this.errorBuffer += str;
 
-                // Split by newlines and process complete lines
+                // Process complete lines immediately
                 const lines = this.errorBuffer.split(/\r?\n/);
-
-                // Keep the last (potentially incomplete) line in buffer
                 this.errorBuffer = lines.pop() || "";
 
-                // Send all complete lines
                 lines.forEach(line => {
                     if (line.length > 0) {
                         // Check for pin state messages
@@ -211,26 +198,22 @@ int main() {
                         }
                     }
                 });
-
-                // Auto-flush stderr too
-                if (this.errorBuffer.length > 0) {
-                    this.scheduleErrorFlush(onError, onPinState);
-                }
             });
 
             this.process.on("close", (code) => {
                 clearTimeout(timeout);
 
-                // Clear any pending flush timers
-                if (this.flushTimer) {
-                    clearTimeout(this.flushTimer);
-                    this.flushTimer = null;
-                }
-
-                // Send any remaining buffered output
-                if (this.outputBuffer.trim()) {
-                    onOutput(this.outputBuffer.trim(), true);
-                }
+                // Send any remaining buffered chunks immediately
+                    while (this.outputChunks.length > 0) {
+                        const chunk = this.outputChunks.shift()!;
+                        const clean = chunk.replace(/\r?\n$/, '');
+                        const isComplete = /\r?\n$/.test(chunk);
+                        if (clean.length > 0) onOutput(clean, isComplete);
+                    }
+                    // Also flush any legacy outputBuffer if present
+                    if (this.outputBuffer && this.outputBuffer.trim()) {
+                        onOutput(this.outputBuffer.trim(), true);
+                    }
                 if (this.errorBuffer.trim()) {
                     this.logger.warn(`[STDERR final]: ${JSON.stringify(this.errorBuffer)}`);
                     onError(this.errorBuffer.trim());
@@ -251,51 +234,6 @@ int main() {
         }
     }
 
-    // NEW: Schedule auto-flush for stdout
-    private scheduleFlush(onOutput: (line: string, isComplete: boolean) => void) {
-        if (this.flushTimer) {
-            clearTimeout(this.flushTimer);
-        }
-
-        this.flushTimer = setTimeout(() => {
-            if (this.outputBuffer.length > 0) {
-                onOutput(this.outputBuffer, false);
-                this.pendingIncomplete = true; // Mark that we sent incomplete output
-                this.outputBuffer = "";
-            }
-            this.flushTimer = null;
-        }, 50);
-    }
-
-    // NEW: Schedule auto-flush for stderr
-    private scheduleErrorFlush(onError: (line: string) => void, onPinState?: (pin: number, type: 'mode' | 'value' | 'pwm', value: number) => void) {
-        if (this.flushTimer) {
-            clearTimeout(this.flushTimer);
-        }
-
-        this.flushTimer = setTimeout(() => {
-            if (this.errorBuffer.length > 0) {
-                // Check for pin state messages in the remaining buffer
-                const pinModeMatch = this.errorBuffer.match(/\[\[PIN_MODE:(\d+):(\d+)\]\]/);
-                const pinValueMatch = this.errorBuffer.match(/\[\[PIN_VALUE:(\d+):(\d+)\]\]/);
-                const pinPwmMatch = this.errorBuffer.match(/\[\[PIN_PWM:(\d+):(\d+)\]\]/);
-                
-                if (pinModeMatch && onPinState) {
-                    onPinState(parseInt(pinModeMatch[1]), 'mode', parseInt(pinModeMatch[2]));
-                } else if (pinValueMatch && onPinState) {
-                    onPinState(parseInt(pinValueMatch[1]), 'value', parseInt(pinValueMatch[2]));
-                } else if (pinPwmMatch && onPinState) {
-                    onPinState(parseInt(pinPwmMatch[1]), 'pwm', parseInt(pinPwmMatch[2]));
-                } else {
-                    this.logger.warn(`[STDERR auto-flush]: ${JSON.stringify(this.errorBuffer)}`);
-                    onError(this.errorBuffer);
-                }
-                this.errorBuffer = "";
-            }
-            this.flushTimer = null;
-        }, 50);
-    }
-
     sendSerialInput(input: string) {
         this.logger.debug(`Serial Input im Runner angekommen: ${input}`);
         if (this.isRunning && this.process && this.process.stdin && !this.process.killed) {
@@ -306,15 +244,69 @@ int main() {
         }
     }
 
+    // Send next queued chunk (preserve original write boundaries)
+    private sendNextChunk(onOutput: (line: string, isComplete?: boolean) => void) {
+        if (!this.isRunning || this.outputChunks.length === 0) {
+            this.isSendingOutput = false;
+            return;
+        }
+
+        this.isSendingOutput = true;
+        // Pop next chunk and decrement byte counter
+        const chunk = this.outputChunks.shift()!;
+        this.outputChunksBytes = Math.max(0, this.outputChunksBytes - chunk.length);
+
+        // Coalesce small successive chunks without newlines to reduce frequency
+        let coalesced = chunk;
+        while (this.outputChunks.length > 0 && coalesced.length < 256) {
+            // If we've already gathered a newline, stop coalescing further
+            if (/\r?\n/.test(coalesced)) break;
+            const peek = this.outputChunks.shift()!;
+            this.outputChunksBytes = Math.max(0, this.outputChunksBytes - peek.length);
+            coalesced += peek;
+        }
+        // If coalesced does not contain any newline, buffer it and wait
+        if (!/\r?\n/.test(coalesced)) {
+            // Put it back at the front of the queue and stop sending
+            this.outputChunks.unshift(coalesced);
+            this.outputChunksBytes += coalesced.length;
+            this.isSendingOutput = false;
+            return;
+        }
+
+        // coalesced contains at least one newline -> send up to the first newline
+        const parts = coalesced.split(/(\r?\n)/);
+        let toSend = coalesced;
+        let isComplete = false;
+
+        if (parts.length > 1 && (parts[1] === '\n' || parts[1] === '\r\n')) {
+            toSend = parts[0];
+            isComplete = true;
+            const remainder = parts.slice(2).join('');
+            if (remainder) {
+                this.outputChunks.unshift(remainder);
+                this.outputChunksBytes += remainder.length;
+            }
+        } else {
+            isComplete = /\r?\n$/.test(coalesced);
+            if (isComplete) toSend = coalesced.replace(/\r?\n$/, '');
+        }
+
+        if (toSend.length > 0) onOutput(toSend, isComplete);
+
+        const effectiveBaud = Math.min(this.baudrate, MAX_SIMULATED_BAUD);
+        const charDelayMs = getCharDelayMs(effectiveBaud);
+        const totalDelay = Math.max(MIN_SEND_INTERVAL_MS, Math.ceil(charDelayMs * Math.max(1, toSend.length)));
+
+        setTimeout(() => {
+            this.isSendingOutput = false;
+            if (this.outputChunks.length > 0) this.sendNextChunk(onOutput);
+        }, totalDelay);
+    }
+
     stop() {
         this.isRunning = false;
         this.processKilled = true;
-
-        // Clear flush timer
-        if (this.flushTimer) {
-            clearTimeout(this.flushTimer);
-            this.flushTimer = null;
-        }
 
         if (this.process) {
             this.process.kill('SIGKILL');
@@ -324,7 +316,9 @@ int main() {
         // Clear buffers
         this.outputBuffer = "";
         this.errorBuffer = "";
-        this.pendingIncomplete = false;
+        this.outputChunks = [];
+        this.outputChunksBytes = 0;
+        this.isSendingOutput = false;
     }
 }
 

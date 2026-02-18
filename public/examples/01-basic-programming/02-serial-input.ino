@@ -7,6 +7,10 @@ void setup() {
 }
 
 void loop() {
-  // Demonstration complete - just wait
-  delay(10000);
+  if (Serial.available() > 0) {
+    int number = Serial.parseInt();
+    Serial.print("You entered: ");
+    Serial.println(number);
+    Serial.println("Enter another number and press Enter:");
+  }
 }

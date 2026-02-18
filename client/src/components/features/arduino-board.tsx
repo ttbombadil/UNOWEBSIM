@@ -1,10 +1,11 @@
-import { useEffect, useState, useRef } from 'react';
-import { Cpu } from 'lucide-react';
+import { useEffect, useState, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
+import { Cpu, Eye, EyeOff } from 'lucide-react';
 
 interface PinState {
   pin: number;
   mode: 'INPUT' | 'OUTPUT' | 'INPUT_PULLUP';
-  value: number; // 0-255 for analog, 0 or 1 for digital
+  value: number; // analog: 0-1023, pwm: 0-255, digital: 0 or 1
   type: 'digital' | 'analog' | 'pwm';
 }
 
@@ -13,38 +14,52 @@ interface ArduinoBoardProps {
   isSimulationRunning?: boolean;
   txActive?: number; // TX activity counter (changes trigger blink)
   rxActive?: number; // RX activity counter (changes trigger blink)
+  onReset?: () => void; // Callback when reset button is clicked
+  onPinToggle?: (pin: number, newValue: number) => void; // Callback when an INPUT pin is clicked
+  analogPins?: number[]; // array of internal pin numbers for analog pins (14..19)
+  onAnalogChange?: (pin: number, value: number) => void;
 }
 
-// Digital pin positions in the SVG (x coordinates, y=19 for all)
-// Pin 13 is at x=134.8, then each pin is +9 units apart
-const DIGITAL_PIN_POSITIONS: { [key: number]: { x: number; y: number } } = {
-  13: { x: 134.8, y: 19 },
-  12: { x: 143.8, y: 19 },
-  11: { x: 152.8, y: 19 },
-  10: { x: 161.8, y: 19 },
-  9: { x: 170.8, y: 19 },
-  8: { x: 179.8, y: 19 },
-  7: { x: 194.2, y: 19 },
-  6: { x: 203.2, y: 19 },
-  5: { x: 212.2, y: 19 },
-  4: { x: 221.2, y: 19 },
-  3: { x: 230.2, y: 19 },
-  2: { x: 239.2, y: 19 },
-  1: { x: 248.2, y: 19 },
-  0: { x: 257.2, y: 19 },
-};
+// SVG viewBox dimensions (from ArduinoUno.svg)
+const VIEWBOX_WIDTH = 285.2;
+const VIEWBOX_HEIGHT = 209;
+const SAFE_MARGIN = 4; // px gap to window edges
+
+// PWM-capable pins on Arduino UNO
+const PWM_PINS = [3, 5, 6, 9, 10, 11];
 
 export function ArduinoBoard({
   pinStates = [],
   isSimulationRunning = false,
   txActive = 0,
   rxActive = 0,
+  onReset,
+  onPinToggle,
+  analogPins = [],
+  onAnalogChange,
 }: ArduinoBoardProps) {
   const [svgContent, setSvgContent] = useState<string>('');
+  const [boardColor, setBoardColor] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem('unoBoardColor') || '#0f7391';
+    } catch {
+      return '#0f7391';
+    }
+  });
+  const [overlaySvgContent, setOverlaySvgContent] = useState<string>('');
   const [txBlink, setTxBlink] = useState(false);
   const [rxBlink, setRxBlink] = useState(false);
+  const [showPWMValues, setShowPWMValues] = useState(false);
   const txTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const rxTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [scale, setScale] = useState<number>(1);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const innerWrapperRef = useRef<HTMLDivElement>(null);
+
+  // Slider positions in percent of viewBox (left%, top%)
+  const [sliderPositions, setSliderPositions] = useState<Array<{ pin: number; leftPct: number; topPct: number; value: number; sliderLen: number; placement: 'above' | 'below' }>>([]);
+  const [analogDialog, setAnalogDialog] = useState<null | { open: true; pin: number; value: number; leftPct: number; topPct: number; placement: 'above' | 'below' }>(null);
 
   // Handle TX blink (stays on for 100ms after activity)
   useEffect(() => {
@@ -64,179 +79,548 @@ export function ArduinoBoard({
     }
   }, [rxActive]);
 
+  // Load both SVGs once
   useEffect(() => {
-    // Load SVG content
-    fetch('/ArduinoUno.svg')
-      .then(response => response.text())
-      .then(text => {
-        setSvgContent(text);
+    Promise.all([
+      fetch('/ArduinoUno.svg').then(r => r.text()),
+      fetch('/ArduinoUno-overlay.svg').then(r => r.text())
+    ])
+      .then(([main, overlay]) => {
+        setSvgContent(main);
+        setOverlaySvgContent(overlay);
       })
-      .catch(err => console.error('Failed to load Arduino SVG:', err));
+      .catch(err => console.error('Failed to load Arduino SVGs:', err));
   }, []);
 
-  // PWM-capable pins on Arduino UNO
-  const PWM_PINS = [3, 5, 6, 9, 10, 11];
+  // Listen for color changes from secret dialog (custom event)
+  useEffect(() => {
+    const onColor = (e: Event) => {
+      try {
+        const detail = (e as CustomEvent).detail as { color?: string } | undefined;
+        const color = detail?.color || window.localStorage.getItem('unoBoardColor') || '#0f7391';
+        setBoardColor(color);
+      } catch {
+        // ignore
+      }
+    };
+    document.addEventListener('arduinoColorChange', onColor as EventListener);
+    return () => document.removeEventListener('arduinoColorChange', onColor as EventListener);
+  }, []);
 
-  // Get the color for a digital pin based on its state
-  const getPinColor = (pin: number): string => {
+  // Get pin color based on state
+  const getPinColor = useCallback((pin: number): string => {
     const state = pinStates.find(p => p.pin === pin);
-    if (!state) return 'transparent'; // No state = no overlay
+    if (!state) return 'transparent';
     
-    if (state.mode === 'OUTPUT') {
-      // Check if this is a PWM pin with analog value
-      if (state.type === 'pwm' && PWM_PINS.includes(pin)) {
-        // PWM: interpolate between black (0) and red (255)
-        const intensity = Math.round((state.value / 255) * 255);
-        return `rgb(${intensity}, 0, 0)`;
-      } else if (state.value > 0) {
-        // HIGH (5V) = red
-        return '#ff0000';
-      } else {
-        // LOW (0V) = black
-        return '#000000';
-      }
-    } else if (state.mode === 'INPUT' || state.mode === 'INPUT_PULLUP') {
-      // Input mode = yellow
-      return '#ffff00';
+    if (state.type === 'pwm' && PWM_PINS.includes(pin)) {
+      const intensity = Math.round((state.value / 255) * 255);
+      if (intensity <= 0) return 'transparent';
+      return `rgb(${intensity}, 0, 0)`;
     }
-    return 'transparent';
-  };
 
-  // Generate SVG circles for pin state overlays
-  const generatePinOverlays = (): string => {
-    let overlays = '';
+    if (state.type === 'analog') {
+      // analog values expected 0..1023 -> map to 0..255 red intensity
+      const v = Math.max(0, Math.min(1023, state.value));
+      const intensity = Math.round((v / 1023) * 255);
+      if (intensity <= 0) return 'transparent';
+      return `rgb(${intensity}, 0, 0)`;
+    }
+
+    // digital
+    if (state.value > 0) {
+      return '#ff0000';
+    } else {
+      return '#000000';
+    }
+  }, [pinStates]);
+
+  // Check if pin is INPUT
+  const isPinInput = useCallback((pin: number): boolean => {
+    const state = pinStates.find(p => p.pin === pin);
+    return state !== undefined && (state.mode === 'INPUT' || state.mode === 'INPUT_PULLUP');
+  }, [pinStates]);
+
+  // Update overlay SVG elements based on current state
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay || !overlaySvgContent) return;
     
-    for (const [pinStr, pos] of Object.entries(DIGITAL_PIN_POSITIONS)) {
-      const pin = parseInt(pinStr);
-      const color = getPinColor(pin);
+    // Wait for next frame to ensure SVG is parsed and in DOM
+    const rafId = requestAnimationFrame(() => {
+      const svgEl = overlay.querySelector('svg');
+      if (!svgEl) return;
+
+      // Ensure LEDs transition smoothly when toggling (15ms)
+      try {
+        const ledIds = ['led-on', 'led-l', 'led-tx', 'led-rx'];
+        for (const id of ledIds) {
+          const el = svgEl.querySelector<SVGElement>(`#${id}`);
+          if (el && (el as any).style) {
+            // Remove any transition so LED toggles are instantaneous
+            (el as any).style.transition = '';
+          }
+        }
+      } catch (err) {
+        // Non-fatal: if SVG doesn't match expected structure, continue
+      }
+      // Update digital pins 0-13
+      for (let pin = 0; pin <= 13; pin++) {
+        const frame = svgEl.querySelector<SVGRectElement>(`#pin-${pin}-frame`);
+        const state = svgEl.querySelector<SVGCircleElement>(`#pin-${pin}-state`);
+        const click = svgEl.querySelector<SVGRectElement>(`#pin-${pin}-click`);
+        
+        const isInput = isPinInput(pin);
+        const color = getPinColor(pin);
+        
+        // Yellow frame for INPUT pins (show/hide via display)
+        if (frame) {
+          frame.style.display = isInput ? 'block' : 'none';
+          frame.style.filter = isInput ? 'drop-shadow(0 0 2px #ffff00)' : 'none';
+          // Ensure digital frames use solid stroke
+          if (isInput) {
+            (frame as any).style.strokeDasharray = '';
+          } else {
+            (frame as any).style.strokeDasharray = '';
+          }
+        }
+        
+        // State circle fill color
+        if (state) {
+          if (color === 'transparent' || color === '#000000') {
+            // Default/LOW state: black fill, no glow
+            state.setAttribute('fill', '#000000');
+            state.style.filter = 'none';
+          } else {
+            // Active HIGH state: red fill with glow
+            state.setAttribute('fill', color);
+            state.style.filter = `drop-shadow(0 0 3px ${color})`;
+          }
+        }
+        
+        // Click area only for INPUT pins
+        if (click) {
+          click.style.pointerEvents = isInput ? 'auto' : 'none';
+          click.style.cursor = isInput ? 'pointer' : 'default';
+        }
+      }
+
+      // Update analog pins A0-A5 (pins 14-19 internally, or identified as A0-A5)
+      for (let i = 0; i <= 5; i++) {
+        const pinId = `A${i}`;
+        const pinNumber = 14 + i; // A0=14, A1=15, ..., A5=19
+        
+        const frame = svgEl.querySelector<SVGRectElement>(`#pin-${pinId}-frame`);
+        const state = svgEl.querySelector<SVGCircleElement>(`#pin-${pinId}-state`);
+        const click = svgEl.querySelector<SVGRectElement>(`#pin-${pinId}-click`);
+        
+        const isInput = isPinInput(pinNumber);
+        const usedAsAnalog = analogPins.includes(pinNumber);
+        const color = getPinColor(pinNumber);
+        
+        // Yellow frame for INPUT pins (show/hide via display)
+        if (frame) {
+          // Show frame either if runtime set pinMode as INPUT or if code uses analogRead on this pin
+          // When the simulation is stopped, do not show frames for pins that are
+          // only detected via code (usedAsAnalog). This keeps analog-only frames
+          // consistent with digital frames after simulation ends.
+          const show = isInput || (usedAsAnalog && isSimulationRunning);
+          frame.style.display = show ? 'block' : 'none';
+          frame.style.filter = show ? 'drop-shadow(0 0 2px #ffff00)' : 'none';
+          // Determine dashed vs solid: dashed when only used via analogRead (type 'analog'),
+          // solid when explicitly set as digital via pinMode (type 'digital').
+          const state = pinStates.find(p => p.pin === pinNumber);
+          if (show) {
+            if (usedAsAnalog && (!state || state.type === 'analog')) {
+              (frame as any).style.strokeDasharray = '3,2';
+            } else {
+              (frame as any).style.strokeDasharray = '';
+            }
+          } else {
+            (frame as any).style.strokeDasharray = '';
+          }
+        }
+        
+        // State circle fill color
+        if (state) {
+          if (color === 'transparent' || color === '#000000') {
+            // Default/LOW state: black fill, no glow
+            state.setAttribute('fill', '#000000');
+            state.style.filter = 'none';
+          } else {
+            // Active HIGH state: red fill with glow
+            state.setAttribute('fill', color);
+            state.style.filter = `drop-shadow(0 0 3px ${color})`;
+          }
+        }
+        
+        // Click area only for INPUT pins or pins used by analogRead
+        if (click) {
+          const clickable = isInput || usedAsAnalog;
+          click.style.pointerEvents = clickable ? 'auto' : 'none';
+          click.style.cursor = clickable ? 'pointer' : 'default';
+        }
+      }
+
+      // Update LEDs
+      const ledOn = svgEl.querySelector<SVGRectElement>('#led-on');
+      const ledL = svgEl.querySelector<SVGRectElement>('#led-l');
+      const ledTx = svgEl.querySelector<SVGRectElement>('#led-tx');
+      const ledRx = svgEl.querySelector<SVGRectElement>('#led-rx');
       
-      if (color !== 'transparent') {
-        // Add a glowing circle overlay on the pin
-        overlays += `
-          <circle cx="${pos.x}" cy="${pos.y}" r="2.5" 
-            fill="${color}" 
-            fill-opacity="0.8"
-            style="filter: drop-shadow(0 0 2px ${color});"
-          />
-        `;
+      // ON LED - green when running, black when off
+      if (ledOn) {
+        if (isSimulationRunning) {
+          ledOn.setAttribute('fill', '#00ff00');
+          ledOn.setAttribute('fill-opacity', '1');
+          ledOn.style.filter = 'url(#glow-green)';
+        } else {
+          // Make off-state transparent
+          ledOn.setAttribute('fill', 'transparent');
+          ledOn.setAttribute('fill-opacity', '0');
+          ledOn.style.filter = 'none';
+        }
+      }
+      
+      // L LED - yellow when pin 13 is HIGH, black when LOW
+      const pin13State = pinStates.find(p => p.pin === 13);
+      const pin13On = pin13State && pin13State.value > 0;
+      if (ledL) {
+        if (pin13On) {
+          ledL.setAttribute('fill', '#ffff00');
+          ledL.setAttribute('fill-opacity', '1');
+          ledL.style.filter = 'url(#glow-yellow)';
+        } else {
+          // Make off-state transparent
+          ledL.setAttribute('fill', 'transparent');
+          ledL.setAttribute('fill-opacity', '0');
+          ledL.style.filter = 'none';
+        }
+      }
+      
+      // TX LED - yellow when blinking, black when off
+      if (ledTx) {
+        if (txBlink) {
+          ledTx.setAttribute('fill', '#ffff00');
+          ledTx.setAttribute('fill-opacity', '1');
+          ledTx.style.filter = 'url(#glow-yellow)';
+        } else {
+          // Transparent when off
+          ledTx.setAttribute('fill', 'transparent');
+          ledTx.setAttribute('fill-opacity', '0');
+          ledTx.style.filter = 'none';
+        }
+      }
+      
+      // RX LED - yellow when blinking, black when off
+      if (ledRx) {
+        if (rxBlink) {
+          ledRx.setAttribute('fill', '#ffff00');
+          ledRx.setAttribute('fill-opacity', '1');
+          ledRx.style.filter = 'url(#glow-yellow)';
+        } else {
+          // Transparent when off
+          ledRx.setAttribute('fill', 'transparent');
+          ledRx.setAttribute('fill-opacity', '0');
+          ledRx.style.filter = 'none';
+        }
+      }
+    });
+    
+    return () => cancelAnimationFrame(rafId);
+    }, [pinStates, isSimulationRunning, txBlink, rxBlink, isPinInput, getPinColor, overlaySvgContent]);
+
+  // Compute slider positions for analog pins using SVG bbox (percent of viewBox)
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    const inner = innerWrapperRef.current;
+    if (!overlay || !overlaySvgContent || !inner) {
+      setSliderPositions([]);
+      return;
+    }
+
+    const svgEl = overlay.querySelector<SVGSVGElement>('svg');
+    if (!svgEl) {
+      setSliderPositions([]);
+      return;
+    }
+
+    const positions: Array<{ pin: number; leftPct: number; topPct: number; value: number; sliderLen: number; placement: 'above' | 'below' }> = [];
+    for (const pin of analogPins) {
+      if (pin < 14 || pin > 19) continue;
+      const idx = pin - 14;
+      // Try several candidate element ids to find the pin position
+      const candidates = [`pin-A${idx}-state`, `pin-A${idx}-frame`, `pin-A${idx}-click`, `pin-${pin}-state`, `pin-${pin}-frame`, `pin-${pin}-click`];
+      let found: SVGGraphicsElement | null = null;
+      for (const id of candidates) {
+        const el = svgEl.querySelector<SVGGraphicsElement>(`#${id}`);
+        if (el) {
+          found = el;
+          break;
+        }
+      }
+      if (!found) continue;
+
+      try {
+        const bbox = (found as any).getBBox();
+        const cx = bbox.x + bbox.width / 2;
+        const cy = bbox.y + bbox.height / 2;
+        const leftPct = (cx / VIEWBOX_WIDTH) * 100;
+        const topPct = (cy / VIEWBOX_HEIGHT) * 100;
+        const value = pinStates.find(p => p.pin === pin)?.value ?? 0;
+        // Compute slider visual length (in viewBox pixels) and clamp to reasonable size
+        const rawLen = Math.max(16, Math.min(80, bbox.width * 3));
+        // Placement: if pin is in upper half, place slider below; otherwise above
+        const placement: 'above' | 'below' = cy < VIEWBOX_HEIGHT / 2 ? 'below' : 'above';
+        positions.push({ pin, leftPct, topPct, value, sliderLen: rawLen, placement });
+      } catch (err) {
+        // ignore
       }
     }
-    
-    return overlays;
-  };
 
-  // Modify SVG to show LED status and pin states
+    setSliderPositions(positions);
+  }, [overlaySvgContent, analogPins, pinStates]);
+
+  // Handle clicks on the overlay SVG
+  const handleOverlayClick = useCallback((e: React.MouseEvent) => {
+    const target = e.target as Element;
+    
+    // Check for pin click
+    const pinClick = target.closest('[id^="pin-"][id$="-click"]');
+    // debug logs removed
+    if (pinClick && onPinToggle) {
+      // Match both digital pins (0-13) and analog pins (A0-A5)
+      const digitalMatch = pinClick.id.match(/pin-(\d+)-click/);
+      const analogMatch = pinClick.id.match(/pin-A(\d+)-click/);
+      
+      let pin: number | undefined;
+      if (digitalMatch) {
+        pin = parseInt(digitalMatch[1], 10);
+      } else if (analogMatch) {
+        // A0-A5 map to pins 14-19
+        pin = 14 + parseInt(analogMatch[1], 10);
+      }
+      
+      if (pin !== undefined) {
+        const state = pinStates.find(p => p.pin === pin);
+        // debug logs removed
+        // Determine if this analog pin was detected from code (analogRead)
+        const usedAsAnalog = analogPins.includes(pin);
+        // Only open the analog dialog when this pin was actually used by analogRead
+        if (pin >= 14 && pin <= 19 && onAnalogChange && usedAsAnalog) {
+          // Find slider position info if available
+          const info = sliderPositions.find(s => s.pin === pin);
+          const val = state ? state.value : 0;
+          const leftPct = info ? info.leftPct : 50;
+          const topPct = info ? info.topPct : 50;
+          const placement = info ? info.placement : (topPct < 50 ? 'below' : 'above');
+          // Open dialog
+          setAnalogDialog({ open: true, pin, value: val, leftPct, topPct, placement });
+        } else if (state && (state.mode === 'INPUT' || state.mode === 'INPUT_PULLUP')) {
+          const newValue = state.value > 0 ? 0 : 1;
+          console.log(`[ArduinoBoard] Pin ${pin} clicked, toggling to ${newValue}`);
+          onPinToggle(pin, newValue);
+        }
+      }
+      return;
+    }
+    
+    // Check for reset button click
+    const resetClick = target.closest('#reset-click');
+    if (resetClick && onReset) {
+      console.log('[ArduinoBoard] Reset button clicked');
+      onReset();
+    }
+  }, [onPinToggle, onReset, pinStates, sliderPositions, onAnalogChange, analogPins]);
+
+  // Compute scale to fit both width and height
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || !svgContent) return;
+    
+    const updateScale = () => {
+      const cw = el.clientWidth;
+      const ch = el.clientHeight;
+      if (cw > 0 && ch > 0) {
+        const s = Math.min(
+          (cw - SAFE_MARGIN * 2) / VIEWBOX_WIDTH,
+          (ch - SAFE_MARGIN * 2) / VIEWBOX_HEIGHT
+        );
+        setScale(Math.max(s, 0.1));
+      }
+    };
+    
+    const timer = setTimeout(updateScale, 50);
+    const ro = new ResizeObserver(updateScale);
+    ro.observe(el);
+    
+    return () => {
+      clearTimeout(timer);
+      ro.disconnect();
+    };
+  }, [svgContent]);
+
+  // Modify main SVG (static, just styles)
   const getModifiedSvg = () => {
     if (!svgContent) return '';
-    
     let modified = svgContent;
-    
-    // Remove XML declaration if present
     modified = modified.replace(/<\?xml[^?]*\?>/g, '');
-    
-    // Add width/height to SVG if not present and ensure it scales properly
+    // Replace the default board color (#0f7391) in the SVG with the chosen color.
+    // We replace hex occurrences case-insensitively.
+    try {
+      modified = modified.replace(/#0f7391/gi, boardColor);
+    } catch {}
     modified = modified.replace(
       /<svg([^>]*)>/,
-      '<svg$1 style="width: 100%; height: 100%; max-width: 600px;">'
+      `<svg$1 style="width: 100%; height: 100%; display: block;" preserveAspectRatio="xMidYMid meet">`
     );
-    
-    if (isSimulationRunning) {
-      // LED ON: bright green with glow effect
-      modified = modified.replace(
-        /<rect id="rect23418" class="st33"/g,
-        '<rect id="rect23418" style="fill: #00ff00; filter: drop-shadow(0 0 3px #00ff00);"'
-      );
-    } else {
-      // LED OFF: dark green
-      modified = modified.replace(
-        /<rect id="rect23418" class="st33"/g,
-        '<rect id="rect23418" style="fill: #1a3d1a; fill-opacity: 0.6;"'
-      );
-    }
-    
-    // L LED (rect23416 - Pin 13 LED, yellow, at x=127.2, y=50.3)
-    // This should light up when pin 13 is HIGH
-    const pin13State = pinStates.find(p => p.pin === 13);
-    if (pin13State && pin13State.value > 0) {
-      modified = modified.replace(
-        /<rect id="rect23416" class="st34"/g,
-        '<rect id="rect23416" style="fill: #ffff00; filter: drop-shadow(0 0 4px #ffff00);"'
-      );
-    } else {
-      modified = modified.replace(
-        /<rect id="rect23416" class="st34"/g,
-        '<rect id="rect23416" style="fill: #3d3d1a; fill-opacity: 0.6;"'
-      );
-    }
-    
-    // TX LED (led-06033 group, rect at x=126.1, y=66.9)
-    // ID: _x30_.1.11.0.0.0.0.0.1.0
-    if (txBlink) {
-      modified = modified.replace(
-        /<rect id="_x30_.1.11.0.0.0.0.0.1.0" class="st39"/g,
-        '<rect id="_x30_.1.11.0.0.0.0.0.1.0" style="fill: #ffff00; filter: drop-shadow(0 0 4px #ffff00); transition: fill 50ms ease-in-out, filter 50ms ease-in-out;"'
-      );
-    } else {
-      modified = modified.replace(
-        /<rect id="_x30_.1.11.0.0.0.0.0.1.0" class="st39"/g,
-        '<rect id="_x30_.1.11.0.0.0.0.0.1.0" style="fill: #3d3d1a; fill-opacity: 0.6; transition: fill 50ms ease-in-out, filter 50ms ease-in-out;"'
-      );
-    }
-    
-    // RX LED (led-06032 group, rect at x=126.1, y=75)
-    // ID: _x30_.1.10.0.0.0.0.0.1.0
-    if (rxBlink) {
-      modified = modified.replace(
-        /<rect id="_x30_.1.10.0.0.0.0.0.1.0" class="st39"/g,
-        '<rect id="_x30_.1.10.0.0.0.0.0.1.0" style="fill: #ffff00; filter: drop-shadow(0 0 4px #ffff00); transition: fill 50ms ease-in-out, filter 50ms ease-in-out;"'
-      );
-    } else {
-      modified = modified.replace(
-        /<rect id="_x30_.1.10.0.0.0.0.0.1.0" class="st39"/g,
-        '<rect id="_x30_.1.10.0.0.0.0.0.1.0" style="fill: #3d3d1a; fill-opacity: 0.6; transition: fill 50ms ease-in-out, filter 50ms ease-in-out;"'
-      );
-    }
-    
-    // Add pin state overlays before closing </svg> tag
-    const pinOverlays = generatePinOverlays();
-    if (pinOverlays) {
-      modified = modified.replace('</svg>', `${pinOverlays}</svg>`);
-    }
-    
+    return modified;
+  };
+
+  // Modify overlay SVG
+  const getOverlaySvg = () => {
+    if (!overlaySvgContent) return '';
+    let modified = overlaySvgContent;
+    modified = modified.replace(/<\?xml[^?]*\?>/g, '');
+    modified = modified.replace(
+      /<svg([^>]*)>/,
+      `<svg$1 style="width: 100%; height: 100%; display: block; position: absolute; top: 0; left: 0;" preserveAspectRatio="xMidYMid meet">`
+    );
     return modified;
   };
 
   return (
     <div className="h-full flex flex-col bg-card border-t border-border">
       {/* Header */}
-      <div className="flex items-center justify-between bg-muted px-3 py-2 border-b border-border">
-        <div className="flex items-center space-x-2">
-          <Cpu className="h-4 w-4 text-accent" />
-          <span className="text-sm font-medium">Arduino UNO Board</span>
-        </div>
-        <div className="flex items-center space-x-2">
-          <div
-            className={`w-2 h-2 rounded-full ${
-              isSimulationRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-500'
-            }`}
+      <div className="flex items-center justify-between bg-muted px-3 py-2 border-b border-border overflow-hidden">
+        <div className="flex items-center space-x-2 min-w-0 whitespace-nowrap">
+          <Cpu 
+            className="h-4 w-4" 
+            style={{
+              color: isSimulationRunning ? '#22c55e' : '#6b7280',
+              filter: isSimulationRunning ? 'drop-shadow(0 0 4px #22c55e)' : 'none',
+              transition: 'color 200ms ease-in-out, filter 200ms ease-in-out'
+            }}
           />
-          <span className="text-xs text-muted-foreground">
-            {isSimulationRunning ? 'Running' : 'Stopped'}
-          </span>
+          <span className="text-sm font-medium truncate">Arduino UNO Board</span>
         </div>
+        <button
+          onClick={() => setShowPWMValues(!showPWMValues)}
+          className="flex items-center space-x-1 px-2 py-1 text-xs bg-background border border-border rounded hover:bg-accent transition-colors"
+          title={showPWMValues ? 'Hide PWM Values' : 'Show PWM Values'}
+        >
+          {showPWMValues ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+          <span>PWM</span>
+        </button>
       </div>
 
       {/* Board Visualization */}
-      <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-gray-900 min-h-0">
-        {svgContent ? (
+      <div className="flex-1 overflow-auto p-0 flex items-center justify-center bg-gray-900 min-h-0">
+        {svgContent && overlaySvgContent ? (
           <div
-            className="w-full h-full flex items-center justify-center"
-            style={{ filter: 'drop-shadow(0 4px 6px rgba(0, 0, 0, 0.4))' }}
-            dangerouslySetInnerHTML={{ __html: getModifiedSvg() }}
-          />
+            ref={containerRef}
+            className="relative flex items-center justify-center"
+            style={{ 
+              filter: 'drop-shadow(0 4px 6px rgba(0, 0, 0, 0.4))',
+              width: '100%',
+              height: '100%',
+            }}
+          >
+            {/* Scaled inner wrapper to fit both width and height */}
+            <div
+              ref={innerWrapperRef}
+              style={{
+                position: 'relative',
+                width: `${VIEWBOX_WIDTH}px`,
+                height: `${VIEWBOX_HEIGHT}px`,
+                transform: `scale(${scale})`,
+                transformOrigin: 'center',
+              }}
+            >
+              {/* Main SVG - static background */}
+              <div 
+                style={{ position: 'relative', width: '100%', height: '100%' }}
+                dangerouslySetInnerHTML={{ __html: getModifiedSvg() }} 
+              />
+              {/* Overlay SVG - dynamic visualization and click handling */}
+              <div 
+                ref={overlayRef}
+                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
+                onClick={handleOverlayClick}
+                dangerouslySetInnerHTML={{ __html: getOverlaySvg() }} 
+              />
+              {/* analog dialog is rendered as a portal to avoid affecting layout */}
+              <AnalogDialogPortal
+                dialog={analogDialog}
+                overlayRef={overlayRef}
+                onClose={() => setAnalogDialog(null)}
+                onConfirm={(pin: number, value: number) => {
+                  try {
+                    if (onAnalogChange) onAnalogChange(pin, value);
+                  } finally {
+                    setAnalogDialog(null);
+                  }
+                }}
+              />
+            </div>
+          </div>
         ) : (
           <div className="text-gray-500">Loading Arduino Board...</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Portal render function placed after component to keep JSX smaller
+function AnalogDialogPortal(props: {
+  dialog: { open: true; pin: number; value: number; leftPct: number; topPct: number; placement: 'above' | 'below' } | null,
+  overlayRef: React.RefObject<HTMLDivElement> | null,
+  onClose: () => void,
+  onConfirm: (pin: number, value: number) => void
+}) {
+  const { dialog, overlayRef, onClose, onConfirm } = props;
+  if (!dialog || !overlayRef || !overlayRef.current) return null;
+
+  try {
+    const svgEl = overlayRef.current.querySelector('svg');
+    if (!svgEl) return null;
+    const idx = dialog.pin - 14;
+    const el = svgEl.querySelector<SVGGraphicsElement>(`#pin-A${idx}-state`) || svgEl.querySelector<SVGGraphicsElement>(`#pin-${dialog.pin}-state`);
+    if (!el) return null;
+    const rect = (el as Element).getBoundingClientRect();
+    const dialogWidth = 220;
+    const dialogHeight = 84;
+    let left = rect.left + rect.width / 2 - dialogWidth / 2;
+    let top = dialog.placement === 'below' ? rect.bottom + 6 : rect.top - dialogHeight - 6;
+    // clamp to viewport
+    left = Math.max(8, Math.min(window.innerWidth - dialogWidth - 8, left));
+    top = Math.max(8, Math.min(window.innerHeight - dialogHeight - 8, top));
+
+    return createPortal(
+      <div style={{ position: 'fixed', left, top, width: dialogWidth, background: 'rgba(20,20,20,0.95)', color: '#eee', padding: 8, borderRadius: 6, boxShadow: '0 8px 24px rgba(0,0,0,0.6)', zIndex: 10000 }}>
+        <div style={{ fontSize: 12, marginBottom: 6 }}>{dialog.pin >= 14 && dialog.pin <= 19 ? `A${dialog.pin - 14}` : dialog.pin}</div>
+        <DialogInner dialog={dialog} onClose={onClose} onConfirm={onConfirm} />
+      </div>,
+      document.body
+    );
+  } catch (err) {
+    return null;
+  }
+}
+
+function DialogInner(props: { dialog: { open: true; pin: number; value: number }, onClose: () => void, onConfirm: (pin: number, value: number) => void }) {
+  const { dialog, onClose, onConfirm } = props;
+  const [val, setVal] = useState<number>(dialog.value);
+  useEffect(() => setVal(dialog.value), [dialog.value]);
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <input type="range" min={0} max={1023} step={1} value={val} onChange={(e) => setVal(Number((e.target as HTMLInputElement).value))} style={{ flex: 1 }} />
+        <input type="number" min={0} max={1023} value={val} onChange={(e) => setVal(Math.max(0, Math.min(1023, Number(e.target.value || 0))))} style={{ width: 64, background: 'transparent', color: '#eee', border: '1px solid rgba(255,255,255,0.08)', padding: '4px', borderRadius: 4 }} />
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+        <button onClick={onClose} style={{ background: 'transparent', color: '#ccc', border: 'none', padding: '6px 8px', borderRadius: 4 }}>Abbrechen</button>
+        <button onClick={() => onConfirm(dialog.pin, val)} style={{ background: '#1f6feb', color: '#fff', border: 'none', padding: '6px 8px', borderRadius: 4 }}>OK</button>
       </div>
     </div>
   );
